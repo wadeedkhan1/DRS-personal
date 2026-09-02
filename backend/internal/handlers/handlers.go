@@ -136,6 +136,7 @@ const deviceColumns = `
 	d.id, d.org_id, d.name, d.type, d.os_version, d.ip_address,
 	d.assigned_admin_id, u.email AS admin_email,
 	d.group_id, g.name AS group_name,
+	d.allow_screen, d.allow_terminal,
 	d.last_seen_at, d.status, d.metadata, d.created_at, d.updated_at`
 
 func scanDevice(rows interface{ Scan(...any) error }) (models.Device, error) {
@@ -145,6 +146,7 @@ func scanDevice(rows interface{ Scan(...any) error }) (models.Device, error) {
 		&d.ID, &d.OrgID, &d.Name, &d.Type, &d.OSVersion, &d.IPAddress,
 		&d.AssignedAdminID, &d.AssignedAdmin,
 		&d.GroupID, &d.GroupName,
+		&d.AllowScreen, &d.AllowTerminal,
 		&d.LastSeenAt, &d.Status, &metadataBytes, &d.CreatedAt, &d.UpdatedAt,
 	)
 	if err != nil {
@@ -258,6 +260,13 @@ func (h *Handler) GenerateEnrollmentToken(w http.ResponseWriter, r *http.Request
 		req.DeviceType = models.DeviceTypeWindows
 	}
 
+	// An admin's invite link always assigns the devices it enrolls to that admin, so
+	// everyone who uses their link lands in their panel. A super admin may target any
+	// admin (or leave it unassigned) via the request field.
+	if claims.Role != models.RoleSuperAdmin {
+		req.AdminID = &claims.UserID
+	}
+
 	// 12 random bytes -> 96 bits, formatted for someone to retype once.
 	raw, err := auth.GenerateSecret(12)
 	if err != nil {
@@ -369,15 +378,53 @@ func (h *Handler) redeemToken(req models.EnrollDeviceRequest) (deviceID, orgID, 
 		metadata = req.Metadata
 	}
 
-	deviceID = uuid.New().String()
-	if _, err = tx.Exec(`
-		INSERT INTO devices
-			(id, org_id, name, type, os_version, agent_secret_hash,
-			 assigned_admin_id, group_id, status, metadata, last_seen_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'offline', $9, NOW())
-	`, deviceID, orgID, req.Name, req.Type, req.OSVersion, auth.HashSecret(secret),
-		assignedAdminID, groupID, []byte(metadata)); err != nil {
+	// Consent capabilities. Screen defaults on and terminal off, so an older CLI agent
+	// that sends neither behaves exactly as before; the GUI agent sends both.
+	allowScreen := true
+	allowTerminal := false
+	if req.AllowScreen != nil {
+		allowScreen = *req.AllowScreen
+	}
+	if req.AllowTerminal != nil {
+		allowTerminal = *req.AllowTerminal
+	}
+
+	// Identify a device by its system name within the org: re-running the agent on the
+	// same machine re-enrolls that same device row rather than spawning a duplicate that
+	// lingers offline forever. A reusable token can still enroll many *different*
+	// machines, because each has a distinct hostname. Enrolling always mints a fresh
+	// secret, so the previous secret for that machine is invalidated in the same step.
+	err = tx.QueryRow(`
+		SELECT id FROM devices WHERE org_id = $1 AND name = $2 AND type = $3
+	`, orgID, req.Name, req.Type).Scan(&deviceID)
+	switch {
+	case err == sql.ErrNoRows:
+		deviceID = uuid.New().String()
+		if _, err = tx.Exec(`
+			INSERT INTO devices
+				(id, org_id, name, type, os_version, agent_secret_hash,
+				 assigned_admin_id, group_id, allow_screen, allow_terminal,
+				 status, metadata, last_seen_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'offline', $11, NOW())
+		`, deviceID, orgID, req.Name, req.Type, req.OSVersion, auth.HashSecret(secret),
+			assignedAdminID, groupID, allowScreen, allowTerminal, []byte(metadata)); err != nil {
+			return "", "", "", err
+		}
+	case err != nil:
 		return "", "", "", err
+	default:
+		// Existing machine re-enrolling: rotate its secret and re-apply the token's
+		// assignment and the freshly consented capabilities.
+		if _, err = tx.Exec(`
+			UPDATE devices
+			SET agent_secret_hash = $2, os_version = $3, assigned_admin_id = $4,
+			    group_id = $5, allow_screen = $6, allow_terminal = $7,
+			    status = 'offline', last_seen_at = NOW(), updated_at = NOW()
+			WHERE id = $1
+		`, deviceID, auth.HashSecret(secret), req.OSVersion, assignedAdminID,
+			groupID, allowScreen, allowTerminal); err != nil {
+			return "", "", "", err
+		}
 	}
 
 	// Deliberately do NOT mark the token used: it is reusable so it can enroll more

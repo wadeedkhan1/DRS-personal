@@ -20,6 +20,8 @@ type Device struct {
 	Name            string
 	Type            string
 	AssignedAdminID *string
+	AllowScreen     bool
+	AllowTerminal   bool
 }
 
 // DeviceStore is the device persistence the hub depends on.
@@ -83,8 +85,10 @@ func (s *SQLStore) Lookup(ctx context.Context, deviceID string) (Device, bool, e
 	}
 	var dev Device
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, org_id, name, type, assigned_admin_id FROM devices WHERE id = $1
-	`, deviceID).Scan(&dev.ID, &dev.OrgID, &dev.Name, &dev.Type, &dev.AssignedAdminID)
+		SELECT id, org_id, name, type, assigned_admin_id, allow_screen, allow_terminal
+		FROM devices WHERE id = $1
+	`, deviceID).Scan(&dev.ID, &dev.OrgID, &dev.Name, &dev.Type, &dev.AssignedAdminID,
+		&dev.AllowScreen, &dev.AllowTerminal)
 	if err == sql.ErrNoRows {
 		return Device{}, false, nil
 	}

@@ -196,6 +196,28 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onSelectDeviceForS
                     <StatusBadge status={device.status} />
                   </div>
 
+                  {/* What this device consented to expose, chosen by whoever installed the agent. */}
+                  <div className="flex items-center gap-1.5 mb-3">
+                    <span
+                      className={`text-[10px] font-semibold px-2 py-0.5 rounded border ${
+                        device.allow_screen === false
+                          ? 'bg-slate-800/60 text-slate-500 border-slate-700/60 line-through'
+                          : 'bg-sky-500/10 text-sky-300 border-sky-500/20'
+                      }`}
+                    >
+                      Screen
+                    </span>
+                    <span
+                      className={`text-[10px] font-semibold px-2 py-0.5 rounded border ${
+                        device.allow_terminal
+                          ? 'bg-amber-500/10 text-amber-300 border-amber-500/20'
+                          : 'bg-slate-800/60 text-slate-500 border-slate-700/60 line-through'
+                      }`}
+                    >
+                      Terminal
+                    </span>
+                  </div>
+
                   <div className="space-y-1.5 text-xs text-slate-400 pt-2 border-t border-slate-800/80">
                     <div className="flex justify-between">
                       <span className="text-slate-500">IP Address:</span>

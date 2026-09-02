@@ -23,6 +23,8 @@ export interface Device {
   assigned_admin_email?: string | null;
   group_id?: string | null;
   group_name?: string | null;
+  allow_screen?: boolean;
+  allow_terminal?: boolean;
   last_seen_at: string;
   status: DeviceStatus;
   metadata?: Record<string, any>;

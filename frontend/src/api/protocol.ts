@@ -17,6 +17,7 @@ export type MsgType =
   | 'answer'
   | 'ice_candidate'
   | 'session_error'
+  | 'session_capabilities'
   | 'presence_update'
   | 'terminal_command'
   | 'terminal_result';
@@ -53,6 +54,16 @@ export interface SessionReadyPayload {
 export interface SessionErrorPayload {
   sessionId?: string;
   message: string;
+}
+
+/**
+ * Sent once when the session socket opens, telling the viewer what the device consented
+ * to at enrollment. allowScreen gates the live video; allowTerminal gates the terminal.
+ */
+export interface SessionCapabilitiesPayload {
+  sessionId: string;
+  allowScreen: boolean;
+  allowTerminal: boolean;
 }
 
 export interface PresenceUpdatePayload {

@@ -11,19 +11,15 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"log"
 	"os"
-	"os/signal"
 	"path/filepath"
-	"syscall"
 
 	"drs/agent/windows/internal/config"
-	"drs/agent/windows/internal/conn"
 	"drs/agent/windows/internal/enroll"
-	"drs/agent/windows/internal/tray"
+	"drs/agent/windows/internal/gui"
 )
 
 func main() {
@@ -56,8 +52,12 @@ func isFlag(arg string) bool { return len(arg) > 0 && arg[0] == '-' }
 
 func runEnroll() {
 	server := flag.String("server", "", "DRS server base URL, e.g. https://drs.example.com")
-	token := flag.String("token", "", "One-time enrollment token from the portal")
+	token := flag.String("token", "", "Enrollment token from the portal")
 	name := flag.String("name", "", "Device name (defaults to this machine's hostname)")
+	// The GUI is the normal way to choose these; the flags exist so the CLI path can too.
+	// The defaults match the server's: screen on, terminal off.
+	screen := flag.Bool("screen", true, "allow screen sharing")
+	terminal := flag.Bool("terminal", false, "allow remote terminal access")
 	flag.Parse()
 
 	if *server == "" || *token == "" {
@@ -65,7 +65,7 @@ func runEnroll() {
 			"example: drs-agent enroll -server https://drs.example.com -token DRS-ABC123")
 	}
 
-	cfg, err := enroll.Enroll(*server, *token, *name)
+	cfg, err := enroll.Enroll(*server, *token, *name, *screen, *terminal)
 	if err != nil {
 		fatalf("enrollment failed: %v", err)
 	}
@@ -99,6 +99,9 @@ func runUninstall() {
 }
 
 func runAgent() {
+	// -startup is set by the autostart entry so the agent comes up hidden in the tray at
+	// login instead of popping a window open every time the user signs in.
+	startup := flag.Bool("startup", false, "start hidden in the system tray (used at login)")
 	flag.Parse()
 
 	// One agent per login session. Two copies would authenticate as the same device and
@@ -111,48 +114,11 @@ func runAgent() {
 	}
 	defer release()
 
-	cfg, err := config.Load()
-	if err != nil {
-		fatalf("could not read agent identity: %v", err)
-	}
-	if !cfg.Enrolled() {
-		fatalf("this device is not enrolled yet.\n\n" +
-			"Generate a token in the portal, then run:\n" +
-			"  drs-agent enroll -server https://your-server -token DRS-XXXXXX")
-	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	// The tray owns the main goroutine: on Windows the message loop it runs has to be
-	// on the thread the process started on. The connection runs alongside it.
-	tray.Run(func(indicator *tray.Controller) {
-		indicator.Set(tray.Offline)
-
-		go func() {
-			err := conn.Run(ctx, cfg, func(online, inSession bool) {
-				switch {
-				case inSession:
-					indicator.Set(tray.InSession)
-				case online:
-					indicator.Set(tray.Online)
-				default:
-					indicator.Set(tray.Offline)
-				}
-			})
-			if err != nil {
-				// The server permanently rejected us, most likely a deleted or
-				// re-enrolled device. Say so in the tray instead of exiting silently,
-				// or the machine looks like it is still being monitored when it is not.
-				indicator.SetFatal("disconnected: " + err.Error())
-				return
-			}
-			tray.Quit()
-		}()
-	}, func() {
-		stop()
-		log.Println("agent: stopped")
-	})
+	// The GUI owns the main goroutine: on Windows the tray's message loop has to run on
+	// the thread the process started on. It handles enrollment (when the device is not yet
+	// enrolled) and the live connection itself, so there is nothing to set up here first.
+	gui.Run(*startup)
+	log.Println("agent: stopped")
 }
 
 // setupLogging sends output to %AppData%\drs\agent.log.

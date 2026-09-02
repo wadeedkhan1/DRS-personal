@@ -48,6 +48,10 @@ export const EnrollDeviceModal: React.FC<EnrollModalProps> = ({ isOpen, onClose,
     }
   };
 
+  // The invite link the agent GUI understands: the server origin carries the address to
+  // enroll against, and the token rides as a query parameter. The GUI parses both out.
+  const inviteLink = token ? `${window.location.origin}/enroll?token=${token}` : '';
+
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
     setCopied(true);
@@ -174,30 +178,50 @@ export const EnrollDeviceModal: React.FC<EnrollModalProps> = ({ isOpen, onClose,
             </div>
 
             {deviceType === 'windows' ? (
-              <div className="space-y-2">
-                <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider">
-                  Run this on the Windows device
-                </label>
-                <div className="flex items-center gap-2 p-3 rounded-xl bg-slate-950 border border-slate-800 font-mono text-xs text-sky-300">
-                  <span className="truncate">
-                    drs-agent.exe enroll -server {window.location.origin} -token {token}
-                  </span>
-                  <button
-                    onClick={() =>
-                      copyToClipboard(
-                        `drs-agent.exe enroll -server ${window.location.origin} -token ${token}`,
-                      )
-                    }
-                    className="p-1.5 text-slate-400 hover:text-white rounded bg-slate-800 shrink-0"
-                    title="Copy command"
-                  >
-                    {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                  </button>
+              <div className="space-y-3">
+                <div className="space-y-2">
+                  <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider">
+                    Invite link — paste into the DRS Agent
+                  </label>
+                  <div className="flex items-center gap-2 p-3 rounded-xl bg-slate-950 border border-slate-800 font-mono text-xs text-sky-300">
+                    <span className="truncate">{inviteLink}</span>
+                    <button
+                      onClick={() => copyToClipboard(inviteLink)}
+                      className="p-1.5 text-slate-400 hover:text-white rounded bg-slate-800 shrink-0 ml-auto"
+                      title="Copy invite link"
+                    >
+                      {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-slate-500">
+                    Send the recipient the DRS Agent and this link. They open the agent, paste the
+                    link, choose whether to allow <span className="text-slate-300">screen sharing</span>{' '}
+                    and/or <span className="text-slate-300">terminal access</span>, and click Connect.
+                    Their PC appears in this panel under its own computer name.
+                  </p>
                 </div>
-                <p className="text-[11px] text-slate-500">
-                  Then run <span className="font-mono text-slate-400">drs-agent.exe install</span> to
-                  start it automatically at login.
-                </p>
+
+                <details className="text-[11px] text-slate-500">
+                  <summary className="cursor-pointer text-slate-400 hover:text-slate-200">
+                    Prefer the command line?
+                  </summary>
+                  <div className="flex items-center gap-2 mt-2 p-2.5 rounded-xl bg-slate-950 border border-slate-800 font-mono text-xs text-slate-300">
+                    <span className="truncate">
+                      drs-agent.exe enroll -server {window.location.origin} -token {token}
+                    </span>
+                    <button
+                      onClick={() =>
+                        copyToClipboard(
+                          `drs-agent.exe enroll -server ${window.location.origin} -token ${token}`,
+                        )
+                      }
+                      className="p-1.5 text-slate-400 hover:text-white rounded bg-slate-800 shrink-0 ml-auto"
+                      title="Copy command"
+                    >
+                      {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
+                </details>
               </div>
             ) : (
               <div className="space-y-2">

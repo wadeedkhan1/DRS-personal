@@ -3,6 +3,7 @@ import {
   ICECandidatePayload,
   ICEServerConfig,
   SDPPayload,
+  SessionCapabilitiesPayload,
   SessionErrorPayload,
   SessionReadyPayload,
   TerminalResultPayload,
@@ -30,6 +31,8 @@ export interface SessionHandlers {
   onStateChange?: (state: SessionState) => void;
   /** A terminal command finished on the device and returned its output. */
   onTerminalResult?: (result: TerminalResultPayload) => void;
+  /** The device's consented capabilities, sent once when the session opens. */
+  onCapabilities?: (caps: SessionCapabilitiesPayload) => void;
 }
 
 export type SessionState =
@@ -142,6 +145,11 @@ export class SessionConnection {
       case 'terminal_result': {
         const data = (env as Envelope<TerminalResultPayload>).data;
         if (data) this.handlers.onTerminalResult?.(data);
+        break;
+      }
+      case 'session_capabilities': {
+        const data = (env as Envelope<SessionCapabilitiesPayload>).data;
+        if (data) this.handlers.onCapabilities?.(data);
         break;
       }
     }

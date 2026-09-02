@@ -59,6 +59,14 @@ export const ScreenViewer: React.FC<ScreenViewerProps> = ({ device, onClose }) =
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
 
+  // What the device consented to expose. Seeded from the device row so the UI is right
+  // on first paint, then confirmed by the session_capabilities frame the backend sends
+  // when the socket opens.
+  const [caps, setCaps] = useState({
+    allowScreen: device.allow_screen ?? true,
+    allowTerminal: device.allow_terminal ?? false,
+  });
+
   // Terminal (Phase 1 command runner). Rides the same session socket, so it is only
   // available while this viewer is mounted.
   const [showTerminal, setShowTerminal] = useState(false);
@@ -100,6 +108,12 @@ export const ScreenViewer: React.FC<ScreenViewerProps> = ({ device, onClose }) =
       onStats: setStats,
       onStateChange: setState,
       onError: setErrorMessage,
+      onCapabilities: (c) => {
+        setCaps({ allowScreen: c.allowScreen, allowTerminal: c.allowTerminal });
+        // A terminal-only device has no video to wait for, so open the terminal straight
+        // away rather than leaving the operator staring at a black panel.
+        if (!c.allowScreen && c.allowTerminal) setShowTerminal(true);
+      },
       onTerminalResult: (result) => {
         setTermEntries((prev) =>
           prev.map((e) =>
@@ -262,18 +276,20 @@ export const ScreenViewer: React.FC<ScreenViewerProps> = ({ device, onClose }) =
         </div>
 
         <div className="flex items-center gap-2">
-          <button
-            onClick={() => setShowTerminal((v) => !v)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
-              showTerminal
-                ? 'bg-sky-500/15 text-sky-300 border-sky-500/30'
-                : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-transparent'
-            }`}
-            title="Open a command terminal on this device"
-          >
-            <TerminalSquare className="w-3.5 h-3.5 text-sky-400" />
-            <span className="hidden sm:inline">Terminal</span>
-          </button>
+          {caps.allowTerminal && (
+            <button
+              onClick={() => setShowTerminal((v) => !v)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
+                showTerminal
+                  ? 'bg-sky-500/15 text-sky-300 border-sky-500/30'
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-transparent'
+              }`}
+              title="Open a command terminal on this device"
+            >
+              <TerminalSquare className="w-3.5 h-3.5 text-sky-400" />
+              <span className="hidden sm:inline">Terminal</span>
+            </button>
+          )}
 
           <button
             onClick={captureScreenshot}
@@ -345,7 +361,20 @@ export const ScreenViewer: React.FC<ScreenViewerProps> = ({ device, onClose }) =
           </div>
         )}
 
-        {!isLive && !errorMessage && (
+        {!caps.allowScreen && !errorMessage && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-950/95 backdrop-blur-sm z-20 p-6 text-center">
+            <div className="w-12 h-12 rounded-2xl bg-slate-800 border border-slate-700 flex items-center justify-center text-slate-400 mb-4">
+              <ShieldAlert className="w-6 h-6" />
+            </div>
+            <h3 className="text-base font-bold text-slate-100 mb-1">Screen sharing is off for this device</h3>
+            <p className="text-xs text-slate-400 max-w-md leading-relaxed">
+              The person who set up this agent did not enable screen sharing.
+              {caps.allowTerminal ? ' The terminal is still available below.' : ''}
+            </p>
+          </div>
+        )}
+
+        {caps.allowScreen && !isLive && !errorMessage && (
           <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-950/90 backdrop-blur-sm z-20">
             <Loader2 className="w-8 h-8 text-sky-400 animate-spin mb-3" />
             {/*

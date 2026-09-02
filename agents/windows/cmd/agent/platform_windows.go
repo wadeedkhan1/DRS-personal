@@ -27,8 +27,9 @@ func installAutostart(exePath string) error {
 		return err
 	}
 	defer key.Close()
-	// Quoted so a path containing spaces survives.
-	return key.SetStringValue(runKeyName, `"`+exePath+`"`)
+	// Quoted so a path containing spaces survives. -startup brings the agent up hidden in
+	// the tray at login rather than opening its window in the user's face.
+	return key.SetStringValue(runKeyName, `"`+exePath+`" -startup`)
 }
 
 func uninstallAutostart() error {

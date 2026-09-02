@@ -69,6 +69,8 @@ type Device struct {
 	GroupID         *string         `json:"group_id"`
 	GroupName       *string         `json:"group_name,omitempty"`
 	AgentSecretHash string          `json:"-"`
+	AllowScreen     bool            `json:"allow_screen"`
+	AllowTerminal   bool            `json:"allow_terminal"`
 	LastSeenAt      time.Time       `json:"last_seen_at"`
 	Status          string          `json:"status"` // online, offline, in_session
 	Metadata        json.RawMessage `json:"metadata"`
@@ -151,6 +153,12 @@ type EnrollDeviceRequest struct {
 	Type            string          `json:"type"` // windows, android
 	OSVersion       string          `json:"os_version"`
 	Metadata        json.RawMessage `json:"metadata,omitempty"`
+
+	// Capabilities the person installing the agent consented to. Pointers so "not sent"
+	// is distinct from "sent false": an older CLI agent omits them and gets the safe
+	// defaults (screen on, terminal off); the GUI agent always sends both explicitly.
+	AllowScreen   *bool `json:"allow_screen,omitempty"`
+	AllowTerminal *bool `json:"allow_terminal,omitempty"`
 }
 
 // EnrollDeviceResponse is the agent's identity, handed over exactly once at

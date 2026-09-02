@@ -21,6 +21,8 @@ type enrollRequest struct {
 	Name            string `json:"name"`
 	Type            string `json:"type"`
 	OSVersion       string `json:"os_version"`
+	AllowScreen     bool   `json:"allow_screen"`
+	AllowTerminal   bool   `json:"allow_terminal"`
 }
 
 type enrollResponse struct {
@@ -35,8 +37,10 @@ type errorResponse struct {
 }
 
 // Enroll redeems a token and returns the identity to persist. deviceName may be empty,
-// in which case the machine's hostname is used.
-func Enroll(serverURL, token, deviceName string) (config.Config, error) {
+// in which case the machine's hostname is used. allowScreen and allowTerminal are the
+// capabilities the user consented to; they are sent to the server (which enforces them)
+// and recorded in the returned config for display.
+func Enroll(serverURL, token, deviceName string, allowScreen, allowTerminal bool) (config.Config, error) {
 	serverURL = strings.TrimRight(serverURL, "/")
 	if deviceName == "" {
 		if h, err := os.Hostname(); err == nil {
@@ -51,6 +55,8 @@ func Enroll(serverURL, token, deviceName string) (config.Config, error) {
 		Name:            deviceName,
 		Type:            runtime.GOOS,
 		OSVersion:       sysinfo.Info().OS,
+		AllowScreen:     allowScreen,
+		AllowTerminal:   allowTerminal,
 	})
 	if err != nil {
 		return config.Config{}, err
@@ -89,6 +95,8 @@ func Enroll(serverURL, token, deviceName string) (config.Config, error) {
 		DeviceID:                 out.DeviceID,
 		AgentSecret:              out.AgentSecret,
 		HeartbeatIntervalSeconds: out.HeartbeatIntervalSeconds,
+		AllowScreen:              allowScreen,
+		AllowTerminal:            allowTerminal,
 	}
 	if cfg.WSURL == "" {
 		cfg.WSURL = config.DeriveWSURL(serverURL)

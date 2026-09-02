@@ -21,6 +21,13 @@ type Config struct {
 	DeviceID                 string `json:"deviceId"`
 	AgentSecret              string `json:"agentSecret"`
 	HeartbeatIntervalSeconds int    `json:"heartbeatIntervalSeconds"`
+
+	// The capabilities this machine consented to at enrollment. Recorded so the GUI can
+	// show them and pre-tick the boxes on a re-enroll. They are the values that were sent
+	// to the server, which is where they are actually enforced; the agent keeps them only
+	// for display.
+	AllowScreen   bool `json:"allowScreen"`
+	AllowTerminal bool `json:"allowTerminal"`
 }
 
 // Enrolled reports whether this config can actually connect.

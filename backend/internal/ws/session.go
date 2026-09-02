@@ -31,7 +31,13 @@ type viewerConn struct {
 	deviceID  string
 	sessionID string
 	ip        string // captured at open; used to attribute per-command terminal audit
-	endOnce   sync.Once
+
+	// Capabilities the device consented to at enrollment, copied from the device row when
+	// the session opens. allowTerminal gates the one operator->device input path.
+	allowScreen   bool
+	allowTerminal bool
+
+	endOnce sync.Once
 }
 
 // browserUpgrader builds the upgrader for browser-originated sockets.
@@ -124,6 +130,13 @@ func (h *Hub) ServeSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "device not found", http.StatusNotFound)
 		return
 	}
+	// A device that consented to neither screen nor terminal exposes nothing, so there is
+	// no session to open. Refuse before upgrading rather than opening a socket that can do
+	// nothing.
+	if !device.AllowScreen && !device.AllowTerminal {
+		http.Error(w, "device is not sharing its screen or terminal", http.StatusForbidden)
+		return
+	}
 	if !h.agentOnline(deviceID) {
 		http.Error(w, "device is offline", http.StatusConflict)
 		return
@@ -148,6 +161,9 @@ func (h *Hub) ServeSession(w http.ResponseWriter, r *http.Request) {
 		deviceID:  deviceID,
 		sessionID: sessionID,
 		ip:        clientIP(r),
+
+		allowScreen:   device.AllowScreen,
+		allowTerminal: device.AllowTerminal,
 	}
 
 	// Claim the device before anything else. This is where SRS FR-5.3 is enforced, and
@@ -178,25 +194,37 @@ func (h *Hub) ServeSession(w http.ResponseWriter, r *http.Request) {
 		}, clientIP(r))
 	}
 
-	// Tell the agent to start producing. The ICE list is attached here and fetched by
-	// the browser from GET /api/session/ice, so both peers negotiate against an
-	// identical view of the network.
-	start, err := protocol.Encode(protocol.TypeStartSession, protocol.StartSession{
-		SessionID:          sessionID,
-		Mode:               protocol.ModeWebRTC,
-		FPS:                h.sessionFPS,
-		MaxWidth:           h.sessionMaxWidth,
-		ICEServers:         h.ice.Servers(),
-		ICETransportPolicy: h.ice.TransportPolicy(),
-		Operator:           claims.Email,
+	// Tell the browser what this device consented to, so it renders the screen area only
+	// when screen sharing is on and the terminal only when terminal access is on.
+	_ = sock.sendEnvelope(protocol.TypeSessionCapabilities, protocol.SessionCapabilities{
+		SessionID:     sessionID,
+		AllowScreen:   vc.allowScreen,
+		AllowTerminal: vc.allowTerminal,
 	})
-	if err == nil {
-		if err := h.sendToAgent(deviceID, start); err != nil {
-			_ = sock.sendEnvelope(protocol.TypeSessionError, protocol.SessionErrorMsg{
-				SessionID: sessionID,
-				Message:   "device went offline",
-			})
-			return
+
+	// Tell the agent to start producing, but only if the device shares its screen. A
+	// terminal-only device opens the session socket (so commands can flow) without any
+	// capture ever starting. The ICE list is attached here and fetched by the browser
+	// from GET /api/session/ice, so both peers negotiate against an identical view of the
+	// network.
+	if vc.allowScreen {
+		start, err := protocol.Encode(protocol.TypeStartSession, protocol.StartSession{
+			SessionID:          sessionID,
+			Mode:               protocol.ModeWebRTC,
+			FPS:                h.sessionFPS,
+			MaxWidth:           h.sessionMaxWidth,
+			ICEServers:         h.ice.Servers(),
+			ICETransportPolicy: h.ice.TransportPolicy(),
+			Operator:           claims.Email,
+		})
+		if err == nil {
+			if err := h.sendToAgent(deviceID, start); err != nil {
+				_ = sock.sendEnvelope(protocol.TypeSessionError, protocol.SessionErrorMsg{
+					SessionID: sessionID,
+					Message:   "device went offline",
+				})
+				return
+			}
 		}
 	}
 
@@ -253,6 +281,25 @@ func (h *Hub) relayTerminalCommand(vc *viewerConn, payload []byte, frame []byte)
 	var cmd protocol.TerminalCommand
 	if err := protocol.DecodeData(payload, &cmd); err != nil {
 		return // unparseable command: nothing to audit or run
+	}
+	// Consent gate: a device that did not opt into terminal access never receives a
+	// command, whoever the operator is. The attempt is still audited below so a refused
+	// command is on the record, then answered with an error instead of being relayed.
+	if !vc.allowTerminal {
+		if h.audit != nil {
+			h.audit.Log(vc.orgID, vc.userID, vc.email, "terminal_command_denied", "device", vc.deviceID, map[string]any{
+				"session_id": vc.sessionID,
+				"command":    cmd.Command,
+				"shell":      cmd.Shell,
+			}, vc.ip)
+		}
+		_ = vc.sendEnvelope(protocol.TypeTerminalResult, protocol.TerminalResult{
+			SessionID: vc.sessionID,
+			CommandID: cmd.CommandID,
+			ExitCode:  -1,
+			Error:     "terminal access is not enabled on this device",
+		})
+		return
 	}
 	if h.audit != nil {
 		h.audit.Log(vc.orgID, vc.userID, vc.email, "terminal_command", "device", vc.deviceID, map[string]any{

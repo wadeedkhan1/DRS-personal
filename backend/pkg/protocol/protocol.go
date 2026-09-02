@@ -71,6 +71,13 @@ const (
 	// browser has a single envelope vocabulary rather than two.
 	TypePresenceUpdate MsgType = "presence_update"
 
+	// Backend -> browser only. Sent once when a session socket opens, telling the viewer
+	// which capabilities the device consented to at enrollment, so the UI can show the
+	// screen area only when screen sharing is allowed and the terminal only when terminal
+	// access is allowed. It is advisory to the UI; the real enforcement is that the
+	// backend refuses to start capture or relay a command for a capability that is off.
+	TypeSessionCapabilities MsgType = "session_capabilities"
+
 	// Remote terminal (Phase 1: command runner). TypeTerminalCommand flows browser->agent
 	// carrying one command to run; TypeTerminalResult flows agent->browser with the
 	// captured output. Both ride the existing session socket. The backend relays them, but
@@ -200,6 +207,15 @@ type PresenceUpdate struct {
 type SessionErrorMsg struct {
 	SessionID string `json:"sessionId"`
 	Message   string `json:"message"`
+}
+
+// SessionCapabilities tells the viewer what the device agreed to expose. AllowScreen
+// gates the live video; AllowTerminal gates the remote terminal. The backend sends this
+// right after the session socket opens so the browser can render the right controls.
+type SessionCapabilities struct {
+	SessionID     string `json:"sessionId"`
+	AllowScreen   bool   `json:"allowScreen"`
+	AllowTerminal bool   `json:"allowTerminal"`
 }
 
 // TerminalCommand is a single command an operator asks the device to run. CommandID is
