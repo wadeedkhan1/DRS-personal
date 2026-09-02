@@ -24,8 +24,14 @@
 // Deliberately absent: there is no video-over-WebSocket frame type. Media that has to
 // traverse the server goes through TURN instead, which keeps DTLS-SRTP encryption,
 // congestion control and packet-loss recovery — none of which a hand-rolled relay over
-// the signaling socket would have. There is also no input/remote-control message,
-// because this phase is view-only.
+// the signaling socket would have.
+//
+// The one operator->device input path is the remote terminal (TypeTerminalCommand /
+// TypeTerminalResult). It reverses the original view-only stance for a single, audited
+// purpose: it rides the existing session socket, so the operator has already passed the
+// same RBAC check that guards viewing, and the backend writes an audit entry for every
+// command it relays. Phase 1 is a stateless command runner; a later phase adds an
+// interactive PTY on top of the same envelope vocabulary.
 package protocol
 
 import (
@@ -64,6 +70,13 @@ const (
 	// Backend -> browser only. The agent never sees this one; it lives here so the
 	// browser has a single envelope vocabulary rather than two.
 	TypePresenceUpdate MsgType = "presence_update"
+
+	// Remote terminal (Phase 1: command runner). TypeTerminalCommand flows browser->agent
+	// carrying one command to run; TypeTerminalResult flows agent->browser with the
+	// captured output. Both ride the existing session socket. The backend relays them, but
+	// unlike the SDP/ICE frames it parses the command frame to write an audit entry first.
+	TypeTerminalCommand MsgType = "terminal_command"
+	TypeTerminalResult  MsgType = "terminal_result"
 )
 
 // SessionMode names the media transport. Only WebRTC exists; the constant stays
@@ -187,6 +200,30 @@ type PresenceUpdate struct {
 type SessionErrorMsg struct {
 	SessionID string `json:"sessionId"`
 	Message   string `json:"message"`
+}
+
+// TerminalCommand is a single command an operator asks the device to run. CommandID is
+// browser-generated and echoed back in TerminalResult, so a result can be matched to its
+// command over the shared session socket where results may return out of order. Shell
+// selects the interpreter: "powershell" (default) or "cmd".
+type TerminalCommand struct {
+	SessionID string `json:"sessionId"`
+	CommandID string `json:"commandId"`
+	Command   string `json:"command"`
+	Shell     string `json:"shell,omitempty"`
+}
+
+// TerminalResult carries the outcome of one TerminalCommand. Stdout and stderr are kept
+// separate so the operator can tell them apart. ExitCode is the process exit status.
+// Error is set only when the command could not be run at all (spawn failure, timeout) —
+// distinct from a command that ran and simply exited non-zero.
+type TerminalResult struct {
+	SessionID string `json:"sessionId"`
+	CommandID string `json:"commandId"`
+	Stdout    string `json:"stdout"`
+	Stderr    string `json:"stderr"`
+	ExitCode  int    `json:"exitCode"`
+	Error     string `json:"error,omitempty"`
 }
 
 // Encode marshals a payload into an Envelope frame ready to write.

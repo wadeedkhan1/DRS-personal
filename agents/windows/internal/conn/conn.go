@@ -19,6 +19,7 @@ import (
 	"drs/agent/windows/internal/protocol"
 	"drs/agent/windows/internal/screen"
 	"drs/agent/windows/internal/sysinfo"
+	"drs/agent/windows/internal/terminal"
 )
 
 const (
@@ -120,13 +121,17 @@ func session(ctx context.Context, cfg config.Config, onStatus StatusFunc) (fatal
 	// authorised it.
 	defer capture.StopAll()
 
+	// The command runner shares the same serialised sender; each command it runs sends one
+	// result frame back up this socket.
+	runner := terminal.NewRunner(send)
+
 	if onStatus != nil {
 		onStatus(true, false)
 		defer onStatus(false, false)
 	}
 
 	fatalCh := make(chan error, 1)
-	go reader(sessCtx, endSession, c, fatalCh, capture, onStatus)
+	go reader(sessCtx, endSession, c, fatalCh, capture, runner, onStatus)
 
 	if err := beat(send); err != nil {
 		return nil, err
@@ -195,7 +200,7 @@ func awaitWelcome(ctx context.Context, c *websocket.Conn, interval *time.Duratio
 
 // reader dispatches inbound commands until the connection closes.
 func reader(ctx context.Context, endSession context.CancelFunc, c *websocket.Conn,
-	fatalCh chan<- error, capture *screen.Manager, onStatus StatusFunc) {
+	fatalCh chan<- error, capture *screen.Manager, runner *terminal.Runner, onStatus StatusFunc) {
 
 	// A read error means the socket is gone; cancelling ends the session so the outer
 	// loop can reconnect.
@@ -241,6 +246,14 @@ func reader(ctx context.Context, endSession context.CancelFunc, c *websocket.Con
 			var cand protocol.ICECandidate
 			if err := protocol.DecodeData(env.Data, &cand); err == nil {
 				capture.HandleICECandidate(cand)
+			}
+
+		case protocol.TypeTerminalCommand:
+			var cmd protocol.TerminalCommand
+			if err := protocol.DecodeData(env.Data, &cmd); err == nil && cmd.Command != "" {
+				// Runs on its own goroutine so a slow command never stalls this reader,
+				// which still has to handle heartbeats, session signaling and stops.
+				runner.Execute(ctx, cmd)
 			}
 
 		case protocol.TypePing:

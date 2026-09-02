@@ -4,12 +4,31 @@ import { useAuth } from '../context/AuthContext';
 import { SessionConnection, SessionState, SessionStats } from '../api/session';
 import {
   Maximize2, Minimize2, Camera, PowerOff, Activity, ShieldAlert,
-  Wifi, Clock, Loader2, AlertTriangle, RefreshCw, Link2,
+  Wifi, Clock, Loader2, AlertTriangle, RefreshCw, Link2, TerminalSquare, CornerDownLeft,
 } from 'lucide-react';
 
 interface ScreenViewerProps {
   device: Device;
   onClose: () => void;
+}
+
+/** One command the operator ran, plus its result once it comes back. */
+interface TerminalEntry {
+  commandId: string;
+  command: string;
+  shell: 'powershell' | 'cmd';
+  status: 'running' | 'done';
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number;
+  error?: string;
+}
+
+// crypto.randomUUID is available in every browser that supports WebRTC, but guard anyway
+// so a locked-down context falls back rather than throwing when running a command.
+function newCommandId(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID();
+  return `cmd-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 const emptyStats: SessionStats = {
@@ -40,9 +59,18 @@ export const ScreenViewer: React.FC<ScreenViewerProps> = ({ device, onClose }) =
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
 
+  // Terminal (Phase 1 command runner). Rides the same session socket, so it is only
+  // available while this viewer is mounted.
+  const [showTerminal, setShowTerminal] = useState(false);
+  const [termEntries, setTermEntries] = useState<TerminalEntry[]>([]);
+  const [termInput, setTermInput] = useState('');
+  const [termShell, setTermShell] = useState<'powershell' | 'cmd'>('powershell');
+
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const sessionRef = useRef<SessionConnection | null>(null);
+  const termScrollRef = useRef<HTMLDivElement>(null);
+  const termInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!token) return;
@@ -51,6 +79,9 @@ export const ScreenViewer: React.FC<ScreenViewerProps> = ({ device, onClose }) =
     setStats(emptyStats);
     setErrorMessage(null);
     setPlaying(false);
+    // A new device (or a reconnect) starts a fresh terminal history; keeping the old
+    // output would attribute one machine's results to another.
+    setTermEntries([]);
 
     const session = new SessionConnection(device.id, token, {
       onTrack: (stream) => {
@@ -69,6 +100,22 @@ export const ScreenViewer: React.FC<ScreenViewerProps> = ({ device, onClose }) =
       onStats: setStats,
       onStateChange: setState,
       onError: setErrorMessage,
+      onTerminalResult: (result) => {
+        setTermEntries((prev) =>
+          prev.map((e) =>
+            e.commandId === result.commandId
+              ? {
+                  ...e,
+                  status: 'done',
+                  stdout: result.stdout,
+                  stderr: result.stderr,
+                  exitCode: result.exitCode,
+                  error: result.error,
+                }
+              : e,
+          ),
+        );
+      },
     });
 
     sessionRef.current = session;
@@ -127,6 +174,41 @@ export const ScreenViewer: React.FC<ScreenViewerProps> = ({ device, onClose }) =
     return `${m}:${s < 10 ? '0' : ''}${s}`;
   };
 
+  const runCommand = useCallback(
+    (e: React.FormEvent) => {
+      e.preventDefault();
+      const command = termInput.trim();
+      const session = sessionRef.current;
+      if (!command || !session) return;
+
+      const commandId = newCommandId();
+      const sent = session.sendCommand(command, commandId, termShell);
+      if (!sent) {
+        // The socket is not open (session dropped). Show it as a failed entry rather than
+        // silently swallowing the command.
+        setTermEntries((prev) => [
+          ...prev,
+          { commandId, command, shell: termShell, status: 'done', error: 'Not connected to the device.' },
+        ]);
+        return;
+      }
+      setTermEntries((prev) => [...prev, { commandId, command, shell: termShell, status: 'running' }]);
+      setTermInput('');
+    },
+    [termInput, termShell],
+  );
+
+  // Keep the newest output in view as it streams in.
+  useEffect(() => {
+    const el = termScrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [termEntries, showTerminal]);
+
+  // Put the cursor in the command box the moment the panel opens.
+  useEffect(() => {
+    if (showTerminal) termInputRef.current?.focus();
+  }, [showTerminal]);
+
   // 'relay' means media is going through a TURN server rather than directly, which is
   // worth surfacing: it costs bandwidth and adds latency, and the operator should know
   // the difference rather than being told everything is "P2P".
@@ -181,6 +263,19 @@ export const ScreenViewer: React.FC<ScreenViewerProps> = ({ device, onClose }) =
 
         <div className="flex items-center gap-2">
           <button
+            onClick={() => setShowTerminal((v) => !v)}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
+              showTerminal
+                ? 'bg-sky-500/15 text-sky-300 border-sky-500/30'
+                : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-transparent'
+            }`}
+            title="Open a command terminal on this device"
+          >
+            <TerminalSquare className="w-3.5 h-3.5 text-sky-400" />
+            <span className="hidden sm:inline">Terminal</span>
+          </button>
+
+          <button
             onClick={captureScreenshot}
             disabled={!isLive}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 transition-colors disabled:opacity-40"
@@ -209,7 +304,8 @@ export const ScreenViewer: React.FC<ScreenViewerProps> = ({ device, onClose }) =
         </div>
       </div>
 
-      <div className="flex-1 bg-black flex items-center justify-center relative overflow-hidden">
+      <div className="flex-1 flex flex-col min-h-0">
+        <div className="flex-1 min-h-0 bg-black flex items-center justify-center relative overflow-hidden">
         {/*
           Kept mounted at all times, including behind the overlays, so ontrack always
           has somewhere to attach. muted is required for autoplay to be allowed.
@@ -278,6 +374,99 @@ export const ScreenViewer: React.FC<ScreenViewerProps> = ({ device, onClose }) =
           <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
           <span>The device shows a tray indicator while it is being viewed</span>
         </div>
+        </div>
+
+        {showTerminal && (
+          <div className="h-72 flex flex-col border-t border-slate-800 bg-slate-950">
+            <div className="flex items-center justify-between px-4 h-9 border-b border-slate-800 bg-slate-900/60 shrink-0">
+              <div className="flex items-center gap-2 text-[11px] font-semibold text-slate-300">
+                <TerminalSquare className="w-3.5 h-3.5 text-sky-400" />
+                <span>Terminal — {device.name}</span>
+                <span className="text-slate-600 font-normal hidden sm:inline">runs as the logged-in user</span>
+              </div>
+              <div className="flex items-center gap-1">
+                {(['powershell', 'cmd'] as const).map((sh) => (
+                  <button
+                    key={sh}
+                    onClick={() => setTermShell(sh)}
+                    className={`px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wide transition-colors ${
+                      termShell === sh ? 'bg-sky-500/15 text-sky-300' : 'text-slate-500 hover:text-slate-300'
+                    }`}
+                  >
+                    {sh}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div
+              ref={termScrollRef}
+              className="flex-1 min-h-0 overflow-y-auto px-4 py-2 font-mono text-xs leading-relaxed text-slate-300"
+            >
+              {termEntries.length === 0 && (
+                <div className="text-slate-600 select-none">
+                  Type a command below and press Enter. Try{' '}
+                  <span className="text-slate-400">whoami</span>,{' '}
+                  <span className="text-slate-400">ipconfig</span>, or{' '}
+                  <span className="text-slate-400">Get-Process</span>.
+                </div>
+              )}
+              {termEntries.map((entry) => (
+                <div key={entry.commandId} className="mb-2">
+                  <div className="flex items-start gap-2 text-sky-400">
+                    <span className="text-slate-600 shrink-0">{entry.shell === 'cmd' ? '>' : 'PS>'}</span>
+                    <span className="whitespace-pre-wrap break-all">{entry.command}</span>
+                  </div>
+                  {entry.status === 'running' ? (
+                    <div className="flex items-center gap-2 text-slate-500 pl-6">
+                      <Loader2 className="w-3 h-3 animate-spin" /> running…
+                    </div>
+                  ) : (
+                    <div className="pl-6">
+                      {entry.stdout && (
+                        <pre className="whitespace-pre-wrap break-all text-slate-300 font-mono">{entry.stdout}</pre>
+                      )}
+                      {entry.stderr && (
+                        <pre className="whitespace-pre-wrap break-all text-amber-400 font-mono">{entry.stderr}</pre>
+                      )}
+                      {entry.error && (
+                        <pre className="whitespace-pre-wrap break-all text-rose-400 font-mono">{entry.error}</pre>
+                      )}
+                      {entry.exitCode !== undefined && entry.exitCode !== 0 && !entry.error && (
+                        <div className="text-[10px] text-rose-500/80">exit code {entry.exitCode}</div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            <form
+              onSubmit={runCommand}
+              className="flex items-center gap-2 px-3 h-11 border-t border-slate-800 bg-slate-900/60 shrink-0"
+            >
+              <span className="text-[11px] font-mono text-sky-500 pl-1 shrink-0">
+                {termShell === 'cmd' ? 'cmd' : 'PS'}
+              </span>
+              <input
+                ref={termInputRef}
+                value={termInput}
+                onChange={(e) => setTermInput(e.target.value)}
+                placeholder="Enter a command…"
+                spellCheck={false}
+                autoComplete="off"
+                className="flex-1 bg-transparent outline-none text-xs font-mono text-slate-100 placeholder:text-slate-600"
+              />
+              <button
+                type="submit"
+                disabled={!termInput.trim()}
+                className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-sky-500/15 text-sky-300 text-[11px] font-medium disabled:opacity-40 hover:bg-sky-500/25 transition-colors"
+              >
+                <CornerDownLeft className="w-3 h-3" /> Run
+              </button>
+            </form>
+          </div>
+        )}
       </div>
     </div>
   );

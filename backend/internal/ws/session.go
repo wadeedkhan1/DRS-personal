@@ -30,6 +30,7 @@ type viewerConn struct {
 	orgID     string
 	deviceID  string
 	sessionID string
+	ip        string // captured at open; used to attribute per-command terminal audit
 	endOnce   sync.Once
 }
 
@@ -146,6 +147,7 @@ func (h *Hub) ServeSession(w http.ResponseWriter, r *http.Request) {
 		orgID:     claims.OrgID,
 		deviceID:  deviceID,
 		sessionID: sessionID,
+		ip:        clientIP(r),
 	}
 
 	// Claim the device before anything else. This is where SRS FR-5.3 is enforced, and
@@ -203,8 +205,9 @@ func (h *Hub) ServeSession(w http.ResponseWriter, r *http.Request) {
 }
 
 // readViewer is the operator's inbound loop. The allowlist is the security boundary:
-// a browser may only answer an offer and trickle candidates. It cannot, for instance,
-// send an offer of its own, or a start_session, or anything addressed elsewhere.
+// a browser may only answer an offer, trickle candidates, and — since the terminal
+// feature — send a command to run. It cannot, for instance, send an offer of its own,
+// or a start_session, or anything addressed elsewhere.
 func (h *Hub) readViewer(vc *viewerConn) {
 	defer recoverConn("viewer " + vc.userID)
 
@@ -229,10 +232,40 @@ func (h *Hub) readViewer(vc *viewerConn) {
 			if err := h.sendToAgent(vc.deviceID, data); err != nil {
 				return
 			}
+		case protocol.TypeTerminalCommand:
+			// The one relayed frame the backend parses rather than passing blind: every
+			// command an operator runs on a device is written to the audit trail before
+			// it is forwarded, since this is the first operator->device input path and it
+			// carries real power. Authorization is not re-checked here — the operator
+			// already passed canViewDevice when this socket opened.
+			h.relayTerminalCommand(vc, env.Data, data)
 		default:
 			// Ignored. Notably this drops an offer from the browser: the agent is the
 			// offerer, and accepting a browser offer would invert the negotiation.
 		}
+	}
+}
+
+// relayTerminalCommand audits one terminal command, then forwards it to the device. The
+// audit entry is written even if forwarding then fails, so an attempt against an
+// offline device is still recorded.
+func (h *Hub) relayTerminalCommand(vc *viewerConn, payload []byte, frame []byte) {
+	var cmd protocol.TerminalCommand
+	if err := protocol.DecodeData(payload, &cmd); err != nil {
+		return // unparseable command: nothing to audit or run
+	}
+	if h.audit != nil {
+		h.audit.Log(vc.orgID, vc.userID, vc.email, "terminal_command", "device", vc.deviceID, map[string]any{
+			"session_id": vc.sessionID,
+			"command":    cmd.Command,
+			"shell":      cmd.Shell,
+		}, vc.ip)
+	}
+	if err := h.sendToAgent(vc.deviceID, frame); err != nil {
+		_ = vc.sendEnvelope(protocol.TypeSessionError, protocol.SessionErrorMsg{
+			SessionID: vc.sessionID,
+			Message:   "device went offline",
+		})
 	}
 }
 

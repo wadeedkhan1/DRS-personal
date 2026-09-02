@@ -293,10 +293,12 @@ func (h *Hub) readAgent(ac *agentConn) {
 			}
 
 		case protocol.TypeOffer, protocol.TypeICECandidate,
-			protocol.TypeSessionReady, protocol.TypeSessionError:
+			protocol.TypeSessionReady, protocol.TypeSessionError,
+			protocol.TypeTerminalResult:
 			// Relayed verbatim. The destination comes from the hub's viewer map keyed
 			// by *this* agent's device id, so an agent can only ever reach the
-			// operator watching it.
+			// operator watching it. terminal_result carries command output back to the
+			// one operator whose command produced it.
 			h.forwardToViewer(ac.device.ID, env.Type, data)
 
 		default:

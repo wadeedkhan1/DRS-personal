@@ -17,7 +17,9 @@ export type MsgType =
   | 'answer'
   | 'ice_candidate'
   | 'session_error'
-  | 'presence_update';
+  | 'presence_update'
+  | 'terminal_command'
+  | 'terminal_result';
 
 export interface Envelope<T = unknown> {
   type: MsgType;
@@ -63,6 +65,33 @@ export interface ICEServerConfig {
   urls: string[];
   username?: string;
   credential?: string;
+}
+
+/**
+ * One command an operator sends the device to run (Phase 1 terminal). commandId is
+ * generated here and echoed back in the result, so a result can be matched to its command
+ * over the shared session socket where results may arrive out of order. shell picks the
+ * interpreter: 'powershell' (default) or 'cmd'.
+ */
+export interface TerminalCommandPayload {
+  sessionId: string;
+  commandId: string;
+  command: string;
+  shell?: 'powershell' | 'cmd';
+}
+
+/**
+ * The outcome of one command. stdout and stderr are separate; exitCode is the process
+ * exit status; error is set only when the command could not be run at all (spawn failure
+ * or timeout), as distinct from a command that ran and exited non-zero.
+ */
+export interface TerminalResultPayload {
+  sessionId: string;
+  commandId: string;
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  error?: string;
 }
 
 /** Builds a frame for sending. */
