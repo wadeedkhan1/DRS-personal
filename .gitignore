@@ -1,0 +1,47 @@
+# ---- Secrets and local overrides ----
+.env
+*.env.local
+# Agent identity written at enrollment (contains the device secret)
+drs_agent_config.json
+agent.json
+
+# ---- Dependencies ----
+node_modules/
+
+# ---- JS / frontend build ----
+frontend/dist/
+dist/
+*.tsbuildinfo
+
+# ---- Go / backend build ----
+backend/drs-backend
+backend/drs-backend.exe
+
+# ---- Windows agent build ----
+agents/windows/build/
+agents/windows/*.exe
+
+# ---- Android / React Native build ----
+agents/android/android/build/
+agents/android/android/.gradle/
+agents/android/android/app/build/
+agents/android/android/local.properties
+agents/android/android/.cxx/
+agents/android/android/app/release/
+agents/android/*.apk
+agents/android/*.aab
+agents/android/.expo/
+*.keystore
+!agents/android/android/app/debug.keystore
+
+# ---- Logs & temp ----
+*.log
+npm-debug.log*
+yarn-error.log*
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.iml

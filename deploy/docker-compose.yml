@@ -1,0 +1,148 @@
+# DRS Phase 1 deployment.
+#
+# Copy .env.example to .env and fill it in before starting. Secrets are required rather
+# than defaulted: a compose file with a working default password ships that password to
+# every deployment that forgets to override it.
+#
+#   cp .env.example .env && $EDITOR .env
+#   ./scripts/init_certs.sh your.domain you@example.com
+#   docker compose up -d
+
+services:
+  # Nginx serves the built portal and terminates TLS. The image builds the frontend, so
+  # there is no hand-built dist/ directory to remember to refresh.
+  nginx:
+    build:
+      context: ..
+      dockerfile: deploy/frontend/Dockerfile
+    container_name: drs_nginx
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - certbot_etc:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+    depends_on:
+      - backend
+    networks:
+      - drs_network
+    # Picks up a renewed certificate without an operator having to remember to.
+    command: >
+      sh -c "while :; do sleep 12h & wait $${!}; nginx -s reload; done & nginx -g 'daemon off;'"
+
+  # Go backend: REST API plus the signaling relay. Media passes through the turn
+  # service below, not through this one.
+  backend:
+    build:
+      context: ../backend
+      dockerfile: ../deploy/backend/Dockerfile
+    container_name: drs_backend
+    restart: always
+    environment:
+      PORT: 8080
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      DB_NAME: drs_db
+      DB_SSLMODE: disable
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required (32+ random characters)}
+      CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS is required, e.g. https://drs.example.com}
+      HEARTBEAT_SECONDS: ${HEARTBEAT_SECONDS:-10}
+      STUN_URLS: ${STUN_URLS:-stun:stun.l.google.com:19302}
+      # Set these to enable the TURN relay. Without it, sessions behind symmetric NAT
+      # or a corporate firewall have no fallback path and will fail to connect.
+      TURN_PUBLIC_IP: ${TURN_PUBLIC_IP:-}
+      TURN_SHARED_SECRET: ${TURN_SHARED_SECRET:-}
+      TURN_PORT: ${TURN_PORT:-3478}
+      TURN_REALM: ${TURN_REALM:-drs}
+      FORCE_TURN_RELAY: ${FORCE_TURN_RELAY:-false}
+      DEFAULT_SUPERADMIN_EMAIL: ${ADMIN_EMAIL:-admin@drs.local}
+      DEFAULT_SUPERADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required for the first login}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - drs_network
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: drs_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      POSTGRES_DB: drs_db
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # No migrations mount. The backend binary embeds them and applies them at boot, so
+      # there is one source of truth and one code path for local and deployed runs. The
+      # old mount also fed Postgres the .down.sql files, which it ran in alphabetical
+      # order alongside the up ones.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - drs_network
+
+  # Renews certificates. Sleeps between attempts rather than running on a host cron so
+  # renewal cannot be forgotten when the stack moves to another machine.
+  certbot:
+    image: certbot/certbot:latest
+    container_name: drs_certbot
+    restart: unless-stopped
+    volumes:
+      - certbot_etc:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+    entrypoint: >
+      sh -c "trap exit TERM; while :; do certbot renew --webroot --webroot-path /var/www/certbot; sleep 12h & wait $${!}; done"
+    networks:
+      - drs_network
+
+  # Media relay. Enable with:  docker compose --profile turn up -d
+  #
+  # This is what makes sessions work between networks that have no direct path, which
+  # is every deployment where the device sits behind a home or corporate NAT. With
+  # FORCE_TURN_RELAY=true on the backend, every session's media travels through here
+  # rather than peer-to-peer.
+  #
+  # network_mode: host is not optional. A relay allocates a fresh port per session, and
+  # publishing that range through Docker's bridge would start a userspace proxy per
+  # port and rewrite the source addresses the relay depends on.
+  #
+  # Budget the bandwidth before scaling: each session costs roughly 7-8 Mbps here
+  # (inbound from the agent plus outbound to the viewer) at the default encode
+  # settings.
+  turn:
+    build:
+      context: ../backend
+      dockerfile: ../deploy/backend/Dockerfile
+    container_name: drs_turn
+    restart: always
+    profiles:
+      - turn
+    network_mode: host
+    entrypoint: ["/app/drs-turn"]
+    environment:
+      # Same variables the backend reads, so one .env keeps the credentials the backend
+      # hands out and the credentials this relay accepts in agreement by construction.
+      TURN_PUBLIC_IP: ${TURN_PUBLIC_IP:?TURN_PUBLIC_IP is required for the relay (the VPS public IP)}
+      TURN_SHARED_SECRET: ${TURN_SHARED_SECRET:?TURN_SHARED_SECRET is required for the relay}
+      TURN_PORT: ${TURN_PORT:-3478}
+      TURN_REALM: ${TURN_REALM:-drs}
+      TURN_MIN_PORT: ${TURN_MIN_PORT:-49160}
+      TURN_MAX_PORT: ${TURN_MAX_PORT:-49200}
+
+networks:
+  drs_network:
+    driver: bridge
+
+volumes:
+  pgdata:
+  certbot_etc:
+  certbot_www:
