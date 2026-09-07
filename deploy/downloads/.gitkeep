@@ -1,0 +1,17 @@
+# Agent binaries served at https://<host>/downloads/ are uploaded here, not committed.
+#
+# The Windows agent links libvpx through CGO and uses Fyne, so it cannot be built inside
+# the Linux nginx image — it is built on Windows with agents/windows/build.ps1 and copied
+# up. The Android APK is built with Gradle and copied up the same way.
+#
+# Expected filenames, which frontend/src/hooks/useAgentDownload.ts probes for:
+#
+#   drs-agent.exe    Windows agent
+#   drs-agent.apk    Android agent
+#
+# Publish a build:
+#   scp agents/windows/build/drs-agent.exe root@<host>:/opt/drs/deploy/downloads/
+#
+# No nginx reload is needed — the directory is a bind mount, so a new file is served as
+# soon as it lands. This file only exists to keep the directory present in git; the
+# binaries themselves are gitignored.

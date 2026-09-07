@@ -25,6 +25,12 @@ services:
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
       - certbot_etc:/etc/letsencrypt
       - certbot_www:/var/www/certbot
+      # Agent binaries, served at /downloads/ so an invite link can hand the recipient
+      # the agent as well as the token. A bind mount rather than an image layer: the
+      # Windows agent links libvpx through CGO and uses Fyne, so it cannot be built in
+      # this Linux image — an operator uploads it, and should not need a rebuild to
+      # publish a new one.
+      - ./downloads:/usr/share/nginx/downloads:ro
     depends_on:
       - backend
     networks:

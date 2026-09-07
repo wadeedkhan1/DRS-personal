@@ -21,6 +21,12 @@ backend/drs-backend.exe
 agents/windows/build/
 agents/windows/*.exe
 
+# ---- Agent binaries staged for /downloads/ ----
+# Uploaded to the VPS by an operator, never committed: they are build output, and a
+# 60MB+ binary per build would bloat the repo permanently.
+deploy/downloads/*
+!deploy/downloads/.gitkeep
+
 # ---- Android / React Native build ----
 agents/android/android/build/
 agents/android/android/.gradle/

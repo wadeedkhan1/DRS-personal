@@ -116,13 +116,17 @@ accepting one would invert the negotiation.
 ```
 Super Admin → POST /api/devices/enrollment-token → "DRS-XXXXXX"
    ↓ portal renders an invite link: https://server/enroll?token=DRS-…
-     (opening that link in a browser lands on /enroll, which shows the code and
-      explains that the agent, not the browser, does the enrolling)
+     (opening that link in a browser lands on /enroll, which offers the agent
+      download and the code, and explains that the agent, not the browser, enrolls)
 Agent (paste link) → POST /api/devices/enroll {token, name, type, os, allow_screen, allow_terminal}
                      (Windows agent always sends both capabilities true; Android omits them)
    ↓ server: hash-lookup token → create-or-update device row → mint fresh 32-byte agent secret
    ← {deviceId, agentSecret, wsUrl, heartbeatIntervalSeconds}
 ```
+
+Enrollment needs **two** things at the endpoint: the agent binary and the token. The invite
+link carries both — `/enroll` serves the binary from `/downloads/` alongside the code — so an
+admin sends one link rather than a link plus a file through some other channel.
 
 Behaviours worth knowing, all deliberate:
 
@@ -140,6 +144,14 @@ Behaviours worth knowing, all deliberate:
   (`superAdminOnly` → `anyAdmin`) — the handler already does the right thing.
 - No device row is created when a token is *generated* — only on redemption. (An earlier
   version pre-created one, leaving a permanent "Pending Device" per unused token.)
+- **Agent binaries are served from `/downloads/`**, public like `/enroll` itself: whoever
+  installs an agent generally has no portal account. Holding the binary grants nothing —
+  enrolling still needs a token. They are **uploaded**, not built into the image, because the
+  Windows agent links libvpx through CGO and uses Fyne and so cannot be produced by the Linux
+  build. Both `/enroll` and the enroll modal probe the file with `HEAD` and adapt, since a
+  fresh deployment legitimately has none; `deploy/nginx/conf.d/drs.conf` gives `/downloads/`
+  its own `location` so a missing file 404s instead of falling through to the SPA and
+  answering `index.html` with a 200, which would make every probe report success.
 
 ### Device presence
 
@@ -314,6 +326,9 @@ and the credentials the relay accepts in agreement by construction.
 
 ## 8. Deployment
 
+The step-by-step procedure — secrets, hostname, certificate, firewall, verification — is in
+[`DEPLOYMENT.md`](DEPLOYMENT.md). This section is the shape of the stack, not the runbook.
+
 ### Local (`start_local.bat`, `start_relay.bat`)
 Checks Postgres on 5432, creates `backend/.env` from the example, starts `go run ./cmd/server`
 (applies migrations) and `npm run dev` on port 3000. `start_relay.bat` adds the TURN relay for
@@ -328,6 +343,9 @@ turn (profile "turn", network_mode: host)
 ```
 
 - The frontend image **builds** the SPA, so there is no hand-maintained `dist/`.
+- `deploy/downloads/` is bind-mounted to nginx and served at `/downloads/`. A bind mount, not
+  an image layer, so publishing a new agent build is an upload rather than a rebuild — and no
+  reload is needed, since the directory is read per request.
 - No migrations are mounted into Postgres — the backend binary embeds and applies them.
 - `network_mode: host` on the relay is not optional: it allocates a fresh port per session,
   and publishing that range through Docker's bridge would start a userspace proxy per port

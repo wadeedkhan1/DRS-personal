@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { ApiClient } from '../api/client';
 import { User, DeviceGroup } from '../types';
-import { X, Copy, Check, Monitor, Smartphone } from 'lucide-react';
+import { X, Copy, Check, Monitor, Smartphone, Download, AlertCircle } from 'lucide-react';
+import { useAgentDownload } from '../hooks/useAgentDownload';
 
 interface EnrollModalProps {
   isOpen: boolean;
@@ -18,6 +19,14 @@ export const EnrollDeviceModal: React.FC<EnrollModalProps> = ({ isOpen, onClose,
   const [token, setToken] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [loading, setLoading] = useState(false);
+
+  // Whether this deployment publishes the agent at /downloads/. It decides whether the
+  // invite link is self-contained or the admin still has to send the binary separately,
+  // which is the difference between a one-step and a two-step handover — so say which,
+  // rather than leaving the admin to find out from the recipient.
+  const windowsAgent = useAgentDownload('windows');
+  const androidAgent = useAgentDownload('android');
+  const agent = deviceType === 'windows' ? windowsAgent : androidAgent;
 
   useEffect(() => {
     if (isOpen) {
@@ -194,9 +203,12 @@ export const EnrollDeviceModal: React.FC<EnrollModalProps> = ({ isOpen, onClose,
                     </button>
                   </div>
                   <p className="text-[11px] text-slate-500">
-                    Send the recipient the DRS Agent and this link. They open the agent, paste the
-                    link, choose whether to allow <span className="text-slate-300">screen sharing</span>{' '}
-                    and/or <span className="text-slate-300">terminal access</span>, and click Connect.
+                    {windowsAgent.available
+                      ? 'Send the recipient this link — it offers them the agent download as well as the code.'
+                      : 'Send the recipient the DRS Agent and this link.'}{' '}
+                    They open the agent, paste the link, choose whether to allow{' '}
+                    <span className="text-slate-300">screen sharing</span> and/or{' '}
+                    <span className="text-slate-300">terminal access</span>, and click Connect.
                     Their PC appears in this panel under its own computer name.
                   </p>
                 </div>
@@ -247,6 +259,34 @@ export const EnrollDeviceModal: React.FC<EnrollModalProps> = ({ isOpen, onClose,
                     {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
                   </button>
                 </div>
+              </div>
+            )}
+
+            {/* What the recipient will actually be offered when they open the link. */}
+            {agent.available === true && (
+              <a
+                href={agent.url}
+                className="flex items-center gap-2.5 p-2.5 rounded-xl bg-slate-800/50 hover:bg-slate-800 border border-slate-700/60 text-[11px] text-slate-400 hover:text-slate-200 transition-colors"
+              >
+                <Download className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                <span className="flex-1">
+                  The invite link offers the{' '}
+                  {deviceType === 'windows' ? 'Windows agent' : 'Android APK'} for download.
+                  Get a copy yourself.
+                </span>
+              </a>
+            )}
+
+            {agent.available === false && (
+              <div className="p-2.5 rounded-xl bg-amber-500/[0.06] border border-amber-500/20 flex items-start gap-2.5">
+                <AlertCircle className="w-3.5 h-3.5 text-amber-400 mt-0.5 shrink-0" />
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  No {deviceType === 'windows' ? 'Windows agent' : 'Android APK'} is published
+                  on this server, so the link carries the code only — you will have to send the
+                  agent yourself. To publish one, upload it to{' '}
+                  <span className="font-mono text-slate-300">deploy/downloads/</span> on the
+                  server.
+                </p>
               </div>
             )}
 
