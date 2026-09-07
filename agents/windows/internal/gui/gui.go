@@ -1,9 +1,8 @@
 //go:build windows
 
 // Package gui is the agent's window. It replaces the enroll-on-the-command-line, then
-// run-again flow with a single application the user double-clicks: paste the invite link,
-// choose what to share, and click Connect. Once enrolled it shows connection status and
-// lives in the system tray.
+// run-again flow with a single application the user double-clicks: paste the invite link
+// and click Connect. Once enrolled it shows connection status and lives in the system tray.
 //
 // The whole app runs on one Fyne event loop that owns the main goroutine (a Windows
 // requirement for the tray's message pump). The WebSocket connection runs on its own
@@ -96,7 +95,8 @@ func (u *gui) setupTray() {
 	desk.SetSystemTrayIcon(iconOffline)
 }
 
-// showEnroll builds the first-run form: where to connect, and what to expose.
+// showEnroll builds the first-run form: where to connect, plus a plain statement of what
+// connecting allows (it is a notice, not a choice — see enroll.Enroll).
 func (u *gui) showEnroll() {
 	title := widget.NewLabelWithStyle("Connect this PC to DRS", fyne.TextAlignLeading,
 		fyne.TextStyle{Bold: true})
@@ -125,10 +125,12 @@ func (u *gui) showEnroll() {
 	hostLabel := widget.NewLabelWithStyle("This PC will appear as:  "+u.hostname,
 		fyne.TextAlignLeading, fyne.TextStyle{Italic: true})
 
-	screenCheck := widget.NewCheck("Allow screen sharing", nil)
-	screenCheck.SetChecked(true)
-	termCheck := widget.NewCheck("Allow terminal access (run commands remotely)", nil)
-	termCheck.SetChecked(false)
+	// Both capabilities are always granted, so there is nothing to tick — but the user is
+	// still told plainly what enrolling allows before they click Connect.
+	notice := widget.NewLabel("Once connected, an authorised operator can view this PC's screen " +
+		"and run commands on it. A red tray icon shows while your screen is being viewed, and " +
+		"every command is recorded in the server's audit log.")
+	notice.Wrapping = fyne.TextWrapWord
 
 	status := widget.NewLabel("")
 	status.Wrapping = fyne.TextWrapWord
@@ -140,8 +142,6 @@ func (u *gui) showEnroll() {
 		if strings.TrimSpace(tokenEntry.Text) != "" {
 			tok = strings.TrimSpace(tokenEntry.Text)
 		}
-		allowScreen := screenCheck.Checked
-		allowTerminal := termCheck.Checked
 
 		if server == "" {
 			u.setInlineStatus(status, "Enter the invite link or server address.", true)
@@ -151,16 +151,12 @@ func (u *gui) showEnroll() {
 			u.setInlineStatus(status, "Enter the enrollment token.", true)
 			return
 		}
-		if !allowScreen && !allowTerminal {
-			u.setInlineStatus(status, "Choose at least one: screen sharing or terminal access.", true)
-			return
-		}
 
 		connectBtn.Disable()
 		u.setInlineStatus(status, "Connecting…", false)
 
 		go func() {
-			cfg, err := enroll.Enroll(server, tok, "", allowScreen, allowTerminal)
+			cfg, err := enroll.Enroll(server, tok, "")
 			if err == nil {
 				err = config.Save(cfg)
 			}
@@ -186,10 +182,9 @@ func (u *gui) showEnroll() {
 		),
 		hostLabel,
 		widget.NewSeparator(),
-		widget.NewLabelWithStyle("What may operators do on this PC?", fyne.TextAlignLeading,
+		widget.NewLabelWithStyle("What operators may do on this PC", fyne.TextAlignLeading,
 			fyne.TextStyle{Bold: true}),
-		screenCheck,
-		termCheck,
+		notice,
 		connectBtn,
 		status,
 	)
@@ -206,16 +201,14 @@ func (u *gui) showStatus(cfg config.Config) {
 	label := u.statusLabel
 	u.mu.Unlock()
 
-	shares := shareSummary(cfg)
-
 	info := widget.NewForm(
 		widget.NewFormItem("This PC", widget.NewLabel(u.hostname)),
 		widget.NewFormItem("Server", widget.NewLabel(cfg.ServerURL)),
-		widget.NewFormItem("Sharing", widget.NewLabel(shares)),
+		widget.NewFormItem("Sharing", widget.NewLabel("Screen + Terminal")),
 	)
 
 	hideBtn := widget.NewButton("Hide to tray", func() { u.win.Hide() })
-	reenrollBtn := widget.NewButton("Re-enroll / change sharing", func() { u.showEnroll() })
+	reenrollBtn := widget.NewButton("Re-enroll this PC", func() { u.showEnroll() })
 
 	note := widget.NewLabel("This agent keeps running in the background. A tray icon turns red " +
 		"while your screen is being viewed.")
@@ -339,18 +332,4 @@ func splitInvite(s string) (server, token string, ok bool) {
 		return server, token, true
 	}
 	return strings.TrimRight(s, "/"), "", true
-}
-
-// shareSummary describes what the device consented to, for the status screen.
-func shareSummary(cfg config.Config) string {
-	switch {
-	case cfg.AllowScreen && cfg.AllowTerminal:
-		return "Screen + Terminal"
-	case cfg.AllowScreen:
-		return "Screen only"
-	case cfg.AllowTerminal:
-		return "Terminal only"
-	default:
-		return "Nothing"
-	}
 }

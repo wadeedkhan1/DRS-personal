@@ -32,13 +32,26 @@ export interface Device {
   updated_at: string;
 }
 
+/**
+ * A team: a set of devices, and a set of admins who can therefore see them. The counts
+ * are computed by the server per query rather than stored.
+ */
 export interface DeviceGroup {
   id: string;
   org_id: string;
   name: string;
   description: string;
   created_at: string;
-  device_count?: number;
+  device_count: number;
+  member_count: number;
+}
+
+/** One admin on a team. */
+export interface GroupMember {
+  user_id: string;
+  email: string;
+  role: UserRole;
+  created_at: string;
 }
 
 export interface Session {

@@ -1,13 +1,23 @@
 import React, { useState } from 'react';
+import { Navigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { Shield, Lock, Mail, ArrowRight, AlertCircle } from 'lucide-react';
 
 export const LoginPage: React.FC = () => {
-  const { login } = useAuth();
+  const { login, user } = useAuth();
+  const location = useLocation();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+
+  // Signing in returns the user to the page they were trying to reach, which is what
+  // makes a pasted session link work for someone who was not logged in yet.
+  const destination = (location.state as { from?: { pathname: string } } | null)?.from?.pathname;
+
+  if (user) {
+    return <Navigate to={destination ?? '/devices'} replace />;
+  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

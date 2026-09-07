@@ -22,10 +22,10 @@ type Config struct {
 	AgentSecret              string `json:"agentSecret"`
 	HeartbeatIntervalSeconds int    `json:"heartbeatIntervalSeconds"`
 
-	// The capabilities this machine consented to at enrollment. Recorded so the GUI can
-	// show them and pre-tick the boxes on a re-enroll. They are the values that were sent
-	// to the server, which is where they are actually enforced; the agent keeps them only
-	// for display.
+	// The capabilities requested at enrollment. This build always requests both, so these
+	// are written true; they are kept because configs written by older builds may say
+	// otherwise, and because the server's copy — not this one — is what is enforced. The
+	// agent never reads these to decide whether to obey a command.
 	AllowScreen   bool `json:"allowScreen"`
 	AllowTerminal bool `json:"allowTerminal"`
 }

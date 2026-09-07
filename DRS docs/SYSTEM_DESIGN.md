@@ -14,7 +14,8 @@ Per-agent detail lives in [`AGENT_WINDOWS.md`](AGENT_WINDOWS.md) and
 A remote screen-monitoring platform. Operators log into a web portal, see their enrolled
 devices' live online/offline state, and open a live view of one device's screen. Video travels
 **peer-to-peer from the device to the operator's browser** over WebRTC; the server only
-relays signaling. On devices that consented to it, the operator can also run shell commands.
+relays signaling. On devices whose `allow_terminal` capability is set — every Windows agent,
+unless an admin revokes it — the operator can also run shell commands.
 
 ---
 
@@ -24,8 +25,8 @@ relays signaling. On devices that consented to it, the operator can also run she
 |---|---|---|---|
 | **Backend** | `backend/cmd/server` | Go, `net/http` + `gorilla/websocket` | REST API + WebRTC signaling relay. One process. |
 | **TURN relay** | `backend/cmd/turnserver` | Go, `pion/turn/v4` | Media relay for networks with no direct path. Separate binary. |
-| **Database** | `backend/migrations` | PostgreSQL 16 | Users, devices, groups, sessions, audit, enrollment tokens. |
-| **Portal** | `frontend/` | React 18, TypeScript, Vite, Tailwind, lucide-react | Operator SPA. |
+| **Database** | `backend/migrations` | PostgreSQL 16 | Users, devices, teams and their membership, sessions, audit, enrollment tokens. |
+| **Portal** | `frontend/` | React 18, TypeScript, Vite, Tailwind, lucide-react, react-router-dom v6 | Operator SPA. Real paths, not tab state — see §3, *Portal routes*. |
 | **Windows agent** | `agents/windows/` | Go + CGO (libvpx), Fyne GUI | Desktop endpoint: capture, stream, run commands. |
 | **Android agent** | `agents/android/` | React Native + Kotlin module | Mobile endpoint: capture and stream only. |
 | **Wire protocol** | `backend/pkg/protocol` | Go (source of truth) | Mirrored by `agents/windows/internal/protocol`, `agents/android/src/protocol.ts`, `frontend/src/api/protocol.ts`. |
@@ -50,12 +51,41 @@ Public:
 | POST | `/api/devices/enroll` | Public by necessity — the agent has no credential yet; the token *is* the credential. |
 
 Authenticated (`Authorization: Bearer`, both roles, each scoped by RBAC):
-`GET /api/auth/me`, `/api/devices`, `/api/devices/{id}`, `/api/groups`, `/api/sessions`,
-`/api/audit-logs`, `/api/reports/usage`, `/api/session/ice`
+`GET /api/auth/me`, `/api/devices`, `/api/devices/{id}`, `/api/groups`,
+`/api/groups/{id}/members`, `/api/sessions`, `/api/audit-logs`, `/api/reports/usage`,
+`/api/session/ice`
 
 Super Admin only:
 `POST /api/devices/enrollment-token`, `PUT /api/devices/{id}/assign`,
-`DELETE /api/devices/{id}`, `POST /api/groups`, `GET|POST /api/users`, `DELETE /api/users/{id}`
+`DELETE /api/devices/{id}`, `POST|PATCH /api/groups`, `DELETE /api/groups/{id}`,
+`POST /api/groups/{id}/members`, `DELETE /api/groups/{id}/members/{userId}`,
+`GET|POST /api/users`, `DELETE /api/users/{id}`
+
+`ServeMux` takes one handler per method per prefix, so the two `DELETE`s under
+`/api/groups/` share one entry point (`DeleteGroupOrMember`) that dispatches on the path.
+Deleting a team leaves its devices enrolled but ungrouped (`devices.group_id` is
+`ON DELETE SET NULL`); its memberships cascade, because a team that no longer exists must
+not keep granting access.
+
+### Portal routes (`frontend/src/App.tsx`)
+
+| Path | Page | Access |
+|---|---|---|
+| `/login` | sign-in | public; redirects to the attempted path after auth |
+| `/enroll?token=…` | shows the invite code and what to do with it | public |
+| `/devices` | endpoint list | both roles |
+| `/devices/{id}/live` | one session | both roles |
+| `/viewer` | device picker | both roles |
+| `/teams`, `/teams/{id}` | teams; detail has devices + members | both roles, read-only for Admin |
+| `/sessions`, `/audit`, `/reports` | history and reporting | both roles |
+| `/users` | admin accounts | Super Admin |
+
+This was a single `currentTab` string until recently, which meant the URL never changed:
+no deep links, no back button, and a refresh always landed on the device list even
+mid-session. `/devices/{id}/live` resolves its device from the loaded list, falling back to
+`GET /api/devices/{id}` — that fallback is what makes the URL survive a paste or a refresh,
+when there is no device list yet. Route guards (`RequireAuth`, `RequireSuperAdmin`) only
+decide what to render; `middleware.RequireRole` on the server remains the actual boundary.
 
 ### WebSocket (`backend/internal/ws/`)
 
@@ -84,9 +114,12 @@ accepting one would invert the negotiation.
 ### Enrollment
 
 ```
-Super Admin / Admin → POST /api/devices/enrollment-token → "DRS-XXXXXX"
+Super Admin → POST /api/devices/enrollment-token → "DRS-XXXXXX"
    ↓ portal renders an invite link: https://server/enroll?token=DRS-…
+     (opening that link in a browser lands on /enroll, which shows the code and
+      explains that the agent, not the browser, does the enrolling)
 Agent (paste link) → POST /api/devices/enroll {token, name, type, os, allow_screen, allow_terminal}
+                     (Windows agent always sends both capabilities true; Android omits them)
    ↓ server: hash-lookup token → create-or-update device row → mint fresh 32-byte agent secret
    ← {deviceId, agentSecret, wsUrl, heartbeatIntervalSeconds}
 ```
@@ -100,8 +133,11 @@ Behaviours worth knowing, all deliberate:
 - **Devices are de-duplicated by `(org_id, name, type)`.** Re-running the agent on the same
   machine re-enrolls that same row and rotates its secret rather than spawning a duplicate
   that lingers offline forever. A distinct hostname still creates a distinct device.
-- An **Admin's** invite link always assigns the devices it enrolls to that admin. A Super
-  Admin may target any admin or leave devices unassigned.
+- A Super Admin may target any admin and any team, or leave devices unassigned. The route is
+  registered `superAdminOnly`, so **an Admin cannot generate an invite link at all**;
+  `GenerateEnrollmentToken` still contains a branch pinning a non-super-admin's tokens to
+  themselves, which is dead code today. Opening it up is a one-word change in `main.go`
+  (`superAdminOnly` → `anyAdmin`) — the handler already does the right thing.
 - No device row is created when a token is *generated* — only on redemption. (An earlier
   version pre-created one, leaving a permanent "Pending Device" per unused token.)
 
@@ -198,9 +234,10 @@ or does neither. There is one code path for local and deployed runs.
 |---|---|
 | `organizations` | Tenant root. One is seeded on first boot. |
 | `users` | Portal accounts: `super_admin` \| `admin`. bcrypt password hashes. |
-| `device_groups` | Team/department grouping. |
+| `device_groups` | Teams. Name is unique per org (case-insensitively), because a second "Finance" is a way to believe you granted access you did not. |
+| `user_group_members` | Which admins are on which team. This is what makes a team an access grant rather than a caption. |
 | `devices` | Enrolled endpoints: type, OS, IP, `agent_secret_hash`, assignment, `allow_screen`, `allow_terminal`, status, JSONB metadata. |
-| `enrollment_tokens` | Hashed tokens with their assignment and group, so redemption knows where the device lands. |
+| `enrollment_tokens` | Hashed tokens with their assignment and team, so redemption knows where the device lands. |
 | `sessions` | Session history (start, end, mode, status) behind the usage report. |
 | `audit_logs` | Append-only trail. |
 
@@ -213,8 +250,20 @@ Two hardening details in migration 2:
   aspirational — the application connects as the owner and could rewrite at will.
 
 Migration 3 adds the consent columns with asymmetric defaults: `allow_screen` **TRUE** (so
-existing devices and the plain CLI enroll path keep working) and `allow_terminal` **FALSE**
-(the more powerful capability is opt-in).
+existing devices and an enroll request that omits the fields keep working) and
+`allow_terminal` **FALSE**. Those defaults only cover a caller that sends neither field —
+today only the Android agent. The Windows agent always sends both as **true** (see
+§6, *Device capabilities*).
+
+Migration 4 adds `user_group_members`, an index on `devices.group_id` (which had none,
+correctly, while nothing filtered on it) and the unique team name per org. It folds any
+pre-existing duplicate team names into distinct ones first rather than failing on data that
+was legal when it was written.
+
+**Team membership is additive, never restrictive.** An Admin sees a device assigned to them
+**or** in a team they belong to. Restrictive would have silently revoked access to every
+individually-assigned device the moment the migration ran, and would make an empty
+membership table mean "no Admin can see anything".
 
 ---
 
@@ -225,12 +274,14 @@ existing devices and the plain CLI enroll path keep working) and `allow_terminal
 | Operator auth | bcrypt password → HS256 JWT (24h). `JWT_SECRET` required, ≥32 chars, **no default** — the server refuses to start without it. |
 | Agent auth | 32-byte agent secret, sent over TLS in `hello`; only its hash is stored, compared constant-time. |
 | Enrollment | Hashed single-credential token. Public endpoint by necessity. |
-| RBAC | Super Admin sees the whole org; Admin sees only devices assigned to them. Enforced on REST, on `/ws/session`, and per presence event. |
+| RBAC | Super Admin sees the whole org; Admin sees a device **assigned to them or in a team they belong to**. Enforced on REST (`adminVisibleDevices`, one SQL fragment used by every list), on `/ws/session` (`canViewDevice`), and per presence event (`visibleToAdmin`) — the three must agree, since a REST list and a session socket disagreeing shows up as a mysterious 404 after someone has been told they have access. Membership is read live on REST calls and on every session open; it is deliberately **not** a JWT claim, since a 24h token with no revocation list would mean removing someone from a team did not remove their access. |
+| Presence-feed staleness | The presence socket reads the viewer's team memberships **once at upgrade** and holds them, because `DeviceMeta` carries the assignment fields specifically to keep per-event filtering off the database. The bounded cost: removing an Admin from a team does not cut their presence feed until they reconnect, so they can still see whether an unreachable device is online. Nothing can be viewed or run on that basis — both data paths check live. |
+| Assignment freshness | `AssignDevice` and `DeleteGroup` push the new assignment into the presence store (`UpdateDeviceAssignment`). Presence meta is otherwise written only when an agent connects, so reassigning an online device used to leave its presence record pointing at the previous admin until that agent reconnected — cosmetic while a team was a caption, a failure to revoke once membership grants visibility. |
 | Enumeration | "Not found" and "not permitted" return the same answer everywhere, so endpoints cannot be used to discover other admins' devices or which emails have accounts. |
-| Device consent | `allow_screen` / `allow_terminal`, chosen at enrollment, enforced server-side on every session — a device that never consented to terminal access cannot have a command run on it *even by a Super Admin*. |
+| Device capabilities | `allow_screen` / `allow_terminal`, stored per device and enforced server-side on every session — a device without `allow_terminal` cannot have a command run on it *even by a Super Admin*. The Windows agent requests **both** at enrollment and offers the end user no choice, so this is a server-side policy field, not an end-user consent prompt. Nothing exposes it for editing yet: re-enrolling the device is the only way to change it (see §9). |
 | Session isolation | One viewer per device (`RegisterSession`). Routing by connection identity. Inbound frame allowlists. |
 | Media | DTLS-SRTP end-to-end between agent and browser. The TURN relay forwards packets it cannot read. |
-| Audit | Login success/failure, enrollment, device assign/delete, user create/delete, session start/end, every terminal command (and every denied one). |
+| Audit | Login success/failure, enrollment, device assign/delete, user create/delete, team create/update/delete, team member add/remove, session start/end, every terminal command (and every denied one). Team mutations are permission changes, so they belong in the trail alongside `assign_device` (SRS FR-1.8). **Audit logs stay actor-scoped:** an Admin sees entries where they were the actor. Team membership does not widen this, because `actor_user_id` records who *did* something, which a team does not extend. |
 | Robustness | Every socket goroutine wraps a `recover` — one malformed connection cannot take the process down. Per-socket write mutexes, since gorilla panics on concurrent writes. Read limits: 1 MiB agent, 64 KiB viewer. |
 
 **No secret has a working default.** `JWT_SECRET`, `DB_PASSWORD`, `DEFAULT_SUPERADMIN_PASSWORD`
@@ -293,20 +344,28 @@ turn (profile "turn", network_mode: host)
 ## 9. State of play
 
 **Working end to end locally:** enrollment (GUI and CLI), presence, live WebRTC video from
-the Windows agent, remote terminal, consent capabilities, invite links, hostname de-dup,
-audit trail, usage report, forced TURN relay.
+the Windows agent, remote terminal, per-device capability enforcement, invite links, hostname
+de-dup, audit trail, usage report, forced TURN relay, teams with membership-based access,
+device reassignment from the portal, session history, and deep-linkable portal routes.
 
 **Deferred / not built:**
 
 | Gap | Consequence |
 |---|---|
 | Redis for presence & session state | In-memory, so **single backend instance only**. The `PresenceStore` / `SessionRegistry` interfaces (with compile-time assertions) are the seam that keeps the swap cheap. |
+| Per-admin invite links | The endpoint is Super Admin only; see §4. |
+| Roles beyond two constants | `super_admin` / `admin` are string constants with a DB `CHECK`. No roles or permissions table, no per-resource grants. |
+| Changing a user's role or password | `models.UpdateUserRequest` exists with no handler and no route. An account's role and password are fixed at creation; the only remedy is delete and recreate. |
+| Server-side device filtering | `GET /api/devices` takes no query parameters (SRS FR-6.2). The portal holds the full scoped list and filters by search, status, platform and team client-side, which is fine at this fleet size and is the thing to revisit first when it is not. |
+| One team per device | `devices.group_id` is a single column, so a device belongs to at most one team. |
+| Token redemption tracking | `enrollment_tokens.used_at` and `.device_id` exist and are written by nothing, which is what makes tokens reusable (see §4). |
 | Session recording, object storage | No durable place to put recordings. |
 | MFA | `users.mfa_secret` exists but nothing uses it. |
 | Remote input / control | `sessions.mode` allows `'control'`; nothing implements it. Terminal is the only input path. |
 | Interactive PTY | Terminal is a stateless one-shot runner; a PTY goes on the same envelope vocabulary later. |
 | Android terminal | No `terminal_command` handler on Android. |
-| Android consent picker & boot autostart | Enrollment uses server defaults; the app must be launched manually. |
+| Android boot autostart | The app must be launched manually. |
+| Editing a device's capabilities | `allow_screen` / `allow_terminal` are set at enrollment and nothing can change them afterwards — no endpoint, no portal control. Re-enrolling the device is the only route. Windows agents always enroll with both, so today this only bites a device an admin wants to *restrict*. |
 | Multi-monitor | Primary display only. |
 | Cross-network VPS test | Untested outside the LAN. |
 
@@ -322,6 +381,8 @@ backend/internal/presence/            ← live state + the Redis seam
 backend/internal/ice/provider.go      ← ICE list and TURN credentials
 agents/windows/internal/screen/       ← capture → convert → VP8 → WebRTC
 agents/android/src/                   ← the RN port, module for module
+frontend/src/App.tsx                  ← the route table
 frontend/src/api/session.ts           ← the browser side of a session
 frontend/src/components/ScreenViewer  ← the viewer UI + terminal panel
+frontend/src/pages/Team*.tsx          ← teams: devices in one panel, admins in the other
 ```

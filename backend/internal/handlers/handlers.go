@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"drs/backend/internal/presence"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 // enrollmentTokenTTL is how long a generated token stays redeemable. It is set far in
@@ -139,6 +141,26 @@ const deviceColumns = `
 	d.allow_screen, d.allow_terminal,
 	d.last_seen_at, d.status, d.metadata, d.created_at, d.updated_at`
 
+// adminVisibleDevices is the one place the non-super-admin device visibility rule lives
+// (SRS FR-1.3, FR-1.4, FR-6.4). It expects the caller's user id bound to $1 of the
+// fragment, and mirrors ws.canViewDevice exactly — the REST list and the session socket
+// disagreeing about who may see a device is the kind of bug that only shows up as a
+// mysterious 404 after someone has already been told they have access.
+//
+// The team clause is additive: an Admin on no team keeps precisely the access they had
+// before teams conferred any, so an empty membership table locks nobody out.
+const adminVisibleDevices = `(
+	d.assigned_admin_id = %[1]s
+	OR d.group_id IN (SELECT group_id FROM user_group_members WHERE user_id = %[1]s)
+)`
+
+// visibleDevicesClause renders adminVisibleDevices against a concrete placeholder, so a
+// caller with a different number of preceding arguments cannot silently bind the wrong
+// one.
+func visibleDevicesClause(placeholder string) string {
+	return fmt.Sprintf(adminVisibleDevices, placeholder)
+}
+
 func scanDevice(rows interface{ Scan(...any) error }) (models.Device, error) {
 	var d models.Device
 	var metadataBytes []byte
@@ -172,11 +194,11 @@ func (h *Handler) ListDevices(w http.ResponseWriter, r *http.Request) {
 		WHERE d.org_id = $1`
 	args := []any{claims.OrgID}
 
-	// An Admin sees only their assignments; a Super Admin sees the whole org. Both are
-	// scoped to the caller's organization, so the org_id the schema already carries is
-	// actually load-bearing rather than decorative.
+	// An Admin sees their assignments and their teams' devices; a Super Admin sees the
+	// whole org. Both are scoped to the caller's organization, so the org_id the schema
+	// already carries is actually load-bearing rather than decorative.
 	if claims.Role != models.RoleSuperAdmin {
-		query += ` AND d.assigned_admin_id = $2`
+		query += ` AND ` + visibleDevicesClause("$2")
 		args = append(args, claims.UserID)
 	}
 	query += ` ORDER BY d.created_at DESC`
@@ -221,23 +243,23 @@ func (h *Handler) GetDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	row := h.db.QueryRow(`
-		SELECT `+deviceColumns+`
+	// The visibility rule lives in the WHERE clause rather than in a check after the
+	// scan, so "not permitted" and "not found" are the same code path and cannot drift
+	// apart into an enumeration oracle.
+	query := `
+		SELECT ` + deviceColumns + `
 		FROM devices d
 		LEFT JOIN users u ON d.assigned_admin_id = u.id
 		LEFT JOIN device_groups g ON d.group_id = g.id
-		WHERE d.id = $1 AND d.org_id = $2
-	`, deviceID, claims.OrgID)
-
-	d, err := scanDevice(row)
-	if err != nil {
-		h.respondError(w, http.StatusNotFound, "Device not found")
-		return
+		WHERE d.id = $1 AND d.org_id = $2`
+	args := []any{deviceID, claims.OrgID}
+	if claims.Role != models.RoleSuperAdmin {
+		query += ` AND ` + visibleDevicesClause("$3")
+		args = append(args, claims.UserID)
 	}
-	// Not found and not permitted give the same answer, so this cannot be used to
-	// enumerate other admins' devices.
-	if claims.Role != models.RoleSuperAdmin &&
-		(d.AssignedAdminID == nil || *d.AssignedAdminID != claims.UserID) {
+
+	d, err := scanDevice(h.db.QueryRow(query, args...))
+	if err != nil {
 		h.respondError(w, http.StatusNotFound, "Device not found")
 		return
 	}
@@ -378,8 +400,9 @@ func (h *Handler) redeemToken(req models.EnrollDeviceRequest) (deviceID, orgID, 
 		metadata = req.Metadata
 	}
 
-	// Consent capabilities. Screen defaults on and terminal off, so an older CLI agent
-	// that sends neither behaves exactly as before; the GUI agent sends both.
+	// Capabilities. Screen defaults on and terminal off, which covers an agent that sends
+	// neither (the Android one, and any older Windows build); the Windows agent sends both
+	// as true. The server keeps deciding — an agent asking for a capability is a request.
 	allowScreen := true
 	allowTerminal := false
 	if req.AllowScreen != nil {
@@ -461,6 +484,26 @@ func (h *Handler) AssignDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The admin and group are validated against the caller's org before being written.
+	// The foreign keys prove the rows exist but not that they are this tenant's, and
+	// org_id is the only thing separating tenants.
+	if req.AdminID != nil {
+		var one int
+		if err := h.db.QueryRow(`SELECT 1 FROM users WHERE id = $1 AND org_id = $2`,
+			*req.AdminID, claims.OrgID).Scan(&one); err != nil {
+			h.respondError(w, http.StatusBadRequest, "Unknown admin")
+			return
+		}
+	}
+	if req.GroupID != nil {
+		var one int
+		if err := h.db.QueryRow(`SELECT 1 FROM device_groups WHERE id = $1 AND org_id = $2`,
+			*req.GroupID, claims.OrgID).Scan(&one); err != nil {
+			h.respondError(w, http.StatusBadRequest, "Unknown team")
+			return
+		}
+	}
+
 	res, err := h.db.Exec(`
 		UPDATE devices SET assigned_admin_id = $1, group_id = $2, updated_at = NOW()
 		WHERE id = $3 AND org_id = $4
@@ -473,6 +516,12 @@ func (h *Handler) AssignDevice(w http.ResponseWriter, r *http.Request) {
 		h.respondError(w, http.StatusNotFound, "Device not found")
 		return
 	}
+
+	// Push the new assignment into presence. Without this, reassigning a device that is
+	// currently online leaves the presence record pointing at the previous admin and team
+	// until that agent reconnects — cosmetic staleness while a group was a caption, but a
+	// failure to revoke now that team membership grants visibility.
+	h.presence.UpdateDeviceAssignment(deviceID, req.AdminID, req.GroupID)
 
 	h.audit.Log(claims.OrgID, claims.UserID, claims.Email, "assign_device", "device", deviceID, map[string]any{
 		"assigned_admin_id": req.AdminID,
@@ -609,17 +658,32 @@ func (h *Handler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 
 // Groups
 
-// ListGroups returns the organization's device groups.
+// ListGroups returns the teams visible to the caller.
+//
+// An Admin sees only the teams they belong to. Until membership existed this handler
+// returned every team in the org to both roles, which was harmless while a team was a
+// caption but is an enumeration of the org's structure now that a team name is also the
+// name of an access grant.
 func (h *Handler) ListGroups(w http.ResponseWriter, r *http.Request) {
 	claims, _ := middleware.GetUserClaims(r)
-	rows, err := h.db.Query(`
-		SELECT g.id, g.org_id, g.name, g.description, g.created_at, COUNT(d.id) AS dev_count
+
+	// Counted with a correlated subquery rather than a LEFT JOIN + GROUP BY, because the
+	// member count needs a second aggregate over an unrelated table and joining both at
+	// once multiplies the rows.
+	query := `
+		SELECT g.id, g.org_id, g.name, g.description, g.created_at,
+		       (SELECT COUNT(*) FROM devices d WHERE d.group_id = g.id)            AS dev_count,
+		       (SELECT COUNT(*) FROM user_group_members m WHERE m.group_id = g.id) AS mem_count
 		FROM device_groups g
-		LEFT JOIN devices d ON g.id = d.group_id
-		WHERE g.org_id = $1
-		GROUP BY g.id
-		ORDER BY g.name ASC
-	`, claims.OrgID)
+		WHERE g.org_id = $1`
+	args := []any{claims.OrgID}
+	if claims.Role != models.RoleSuperAdmin {
+		query += ` AND g.id IN (SELECT group_id FROM user_group_members WHERE user_id = $2)`
+		args = append(args, claims.UserID)
+	}
+	query += ` ORDER BY g.name ASC`
+
+	rows, err := h.db.Query(query, args...)
 	if err != nil {
 		h.respondError(w, http.StatusInternalServerError, "Failed to query groups")
 		return
@@ -629,11 +693,19 @@ func (h *Handler) ListGroups(w http.ResponseWriter, r *http.Request) {
 	groups := make([]models.DeviceGroup, 0)
 	for rows.Next() {
 		var g models.DeviceGroup
-		if err := rows.Scan(&g.ID, &g.OrgID, &g.Name, &g.Description, &g.CreatedAt, &g.DeviceCount); err == nil {
+		if err := rows.Scan(&g.ID, &g.OrgID, &g.Name, &g.Description, &g.CreatedAt,
+			&g.DeviceCount, &g.MemberCount); err == nil {
 			groups = append(groups, g)
 		}
 	}
 	h.respondJSON(w, http.StatusOK, groups)
+}
+
+// isUniqueViolation reports whether an error is Postgres 23505. Team names are unique
+// per org, and a clash is the caller's mistake (409) rather than a server fault (500).
+func isUniqueViolation(err error) bool {
+	var pqErr *pq.Error
+	return errors.As(err, &pqErr) && pqErr.Code == "23505"
 }
 
 // CreateGroup adds a team/department grouping (SRS FR-1.7).
@@ -641,23 +713,294 @@ func (h *Handler) CreateGroup(w http.ResponseWriter, r *http.Request) {
 	claims, _ := middleware.GetUserClaims(r)
 
 	var req models.CreateGroupRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
 		h.respondError(w, http.StatusBadRequest, "Invalid group name")
 		return
 	}
 
 	var g models.DeviceGroup
-	if err := h.db.QueryRow(`
+	err := h.db.QueryRow(`
 		INSERT INTO device_groups (org_id, name, description)
 		VALUES ($1, $2, $3)
 		RETURNING id, org_id, name, description, created_at
 	`, claims.OrgID, req.Name, req.Description).Scan(
 		&g.ID, &g.OrgID, &g.Name, &g.Description, &g.CreatedAt,
-	); err != nil {
+	)
+	if isUniqueViolation(err) {
+		h.respondError(w, http.StatusConflict, "A team with that name already exists")
+		return
+	}
+	if err != nil {
 		h.respondError(w, http.StatusInternalServerError, "Failed to create group")
 		return
 	}
+
+	// Creating a team is a permission change now that membership grants visibility, so
+	// it belongs in the trail alongside assign_device (SRS FR-1.8).
+	h.audit.Log(claims.OrgID, claims.UserID, claims.Email, "create_group", "group", g.ID, map[string]any{
+		"name": g.Name,
+	}, r.RemoteAddr)
 	h.respondJSON(w, http.StatusCreated, g)
+}
+
+// UpdateGroup renames a team or edits its description.
+func (h *Handler) UpdateGroup(w http.ResponseWriter, r *http.Request) {
+	claims, _ := middleware.GetUserClaims(r)
+	groupID := pathSegment(r, 2)
+	if groupID == "" {
+		h.respondError(w, http.StatusBadRequest, "Missing group id")
+		return
+	}
+
+	var req models.UpdateGroupRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if req.Name != nil {
+		trimmed := strings.TrimSpace(*req.Name)
+		if trimmed == "" {
+			h.respondError(w, http.StatusBadRequest, "Invalid group name")
+			return
+		}
+		req.Name = &trimmed
+	}
+	if req.Name == nil && req.Description == nil {
+		h.respondError(w, http.StatusBadRequest, "Nothing to update")
+		return
+	}
+
+	// COALESCE leaves an omitted field at its current value, which is what makes a rename
+	// safe to send without also having to restate the description.
+	var g models.DeviceGroup
+	err := h.db.QueryRow(`
+		UPDATE device_groups
+		SET name        = COALESCE($1, name),
+		    description = COALESCE($2, description)
+		WHERE id = $3 AND org_id = $4
+		RETURNING id, org_id, name, description, created_at
+	`, req.Name, req.Description, groupID, claims.OrgID).Scan(
+		&g.ID, &g.OrgID, &g.Name, &g.Description, &g.CreatedAt,
+	)
+	if isUniqueViolation(err) {
+		h.respondError(w, http.StatusConflict, "A team with that name already exists")
+		return
+	}
+	if err == sql.ErrNoRows {
+		h.respondError(w, http.StatusNotFound, "Team not found")
+		return
+	}
+	if err != nil {
+		h.respondError(w, http.StatusInternalServerError, "Failed to update group")
+		return
+	}
+
+	h.audit.Log(claims.OrgID, claims.UserID, claims.Email, "update_group", "group", g.ID, map[string]any{
+		"name": g.Name,
+	}, r.RemoteAddr)
+	h.respondJSON(w, http.StatusOK, g)
+}
+
+// DeleteGroupOrMember routes the two DELETEs that share the /api/groups/ prefix.
+//
+// The mux takes one handler per method per prefix, and these two are the same method on
+// nested paths, so the split happens here rather than in the routing table.
+func (h *Handler) DeleteGroupOrMember(w http.ResponseWriter, r *http.Request) {
+	if pathSegment(r, 3) == "members" {
+		h.RemoveGroupMember(w, r)
+		return
+	}
+	h.DeleteGroup(w, r)
+}
+
+// DeleteGroup removes a team.
+//
+// Devices survive: devices.group_id is ON DELETE SET NULL, so they become ungrouped
+// rather than disappearing with the team. Memberships do not — they cascade, which is
+// the point, since a team that no longer exists must not keep granting access.
+func (h *Handler) DeleteGroup(w http.ResponseWriter, r *http.Request) {
+	claims, _ := middleware.GetUserClaims(r)
+	groupID := pathSegment(r, 2)
+	if groupID == "" {
+		h.respondError(w, http.StatusBadRequest, "Missing group id")
+		return
+	}
+
+	// The members have to be read before the delete: ON DELETE SET NULL means that once
+	// the team is gone there is nothing left to identify which devices used to be in it.
+	type member struct {
+		id      string
+		adminID *string
+	}
+	var members []member
+	if rows, err := h.db.Query(
+		`SELECT id, assigned_admin_id FROM devices WHERE group_id = $1`, groupID,
+	); err == nil {
+		for rows.Next() {
+			var m member
+			if err := rows.Scan(&m.id, &m.adminID); err == nil {
+				members = append(members, m)
+			}
+		}
+		rows.Close()
+	}
+
+	res, err := h.db.Exec(`DELETE FROM device_groups WHERE id = $1 AND org_id = $2`, groupID, claims.OrgID)
+	if err != nil {
+		h.respondError(w, http.StatusInternalServerError, "Failed to delete group")
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		h.respondError(w, http.StatusNotFound, "Team not found")
+		return
+	}
+
+	// Every device that just lost its team also lost the visibility that team conferred.
+	// Presence meta is written only when an agent connects, so a device that is online
+	// right now would otherwise keep feeding status to the departed team's admins until
+	// its agent happened to reconnect.
+	for _, m := range members {
+		h.presence.UpdateDeviceAssignment(m.id, m.adminID, nil)
+	}
+
+	h.audit.Log(claims.OrgID, claims.UserID, claims.Email, "delete_group", "group", groupID, map[string]any{
+		"devices_ungrouped": len(members),
+	}, r.RemoteAddr)
+	h.respondJSON(w, http.StatusOK, map[string]string{"message": "Team deleted successfully"})
+}
+
+// ListGroupMembers returns the admins on a team.
+func (h *Handler) ListGroupMembers(w http.ResponseWriter, r *http.Request) {
+	claims, _ := middleware.GetUserClaims(r)
+	groupID := pathSegment(r, 2)
+	if groupID == "" || pathSegment(r, 3) != "members" {
+		h.respondError(w, http.StatusBadRequest, "Invalid path")
+		return
+	}
+	if !h.canSeeGroup(claims, groupID) {
+		h.respondError(w, http.StatusNotFound, "Team not found")
+		return
+	}
+
+	rows, err := h.db.Query(`
+		SELECT m.user_id, u.email, u.role, m.created_at
+		FROM user_group_members m
+		JOIN users u ON u.id = m.user_id
+		WHERE m.group_id = $1
+		ORDER BY u.email ASC
+	`, groupID)
+	if err != nil {
+		h.respondError(w, http.StatusInternalServerError, "Failed to query members")
+		return
+	}
+	defer rows.Close()
+
+	members := make([]models.GroupMember, 0)
+	for rows.Next() {
+		var m models.GroupMember
+		if err := rows.Scan(&m.UserID, &m.Email, &m.Role, &m.CreatedAt); err == nil {
+			members = append(members, m)
+		}
+	}
+	h.respondJSON(w, http.StatusOK, members)
+}
+
+// canSeeGroup mirrors the scoping in ListGroups: a Super Admin sees any team in the org,
+// an Admin only teams they are on. A team in another org and a team the caller may not
+// see give the same answer as a team that does not exist.
+func (h *Handler) canSeeGroup(claims *auth.JWTClaims, groupID string) bool {
+	query := `SELECT 1 FROM device_groups g WHERE g.id = $1 AND g.org_id = $2`
+	args := []any{groupID, claims.OrgID}
+	if claims.Role != models.RoleSuperAdmin {
+		query += ` AND g.id IN (SELECT group_id FROM user_group_members WHERE user_id = $3)`
+		args = append(args, claims.UserID)
+	}
+	var one int
+	return h.db.QueryRow(query, args...).Scan(&one) == nil
+}
+
+// AddGroupMember puts an admin on a team, which grants them every device in it.
+func (h *Handler) AddGroupMember(w http.ResponseWriter, r *http.Request) {
+	claims, _ := middleware.GetUserClaims(r)
+	groupID := pathSegment(r, 2)
+	if groupID == "" || pathSegment(r, 3) != "members" {
+		h.respondError(w, http.StatusBadRequest, "Invalid path")
+		return
+	}
+
+	var req models.AddGroupMemberRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
+		h.respondError(w, http.StatusBadRequest, "Invalid user id")
+		return
+	}
+	if _, err := uuid.Parse(req.UserID); err != nil {
+		h.respondError(w, http.StatusBadRequest, "Invalid user id")
+		return
+	}
+
+	// Both ids are confirmed to be in the caller's org before the insert. The foreign
+	// keys guarantee the rows exist but say nothing about which organization they belong
+	// to, and org_id is the only thing separating tenants.
+	var email string
+	if err := h.db.QueryRow(`
+		SELECT u.email FROM users u, device_groups g
+		WHERE u.id = $1 AND g.id = $2 AND u.org_id = $3 AND g.org_id = $3
+	`, req.UserID, groupID, claims.OrgID).Scan(&email); err != nil {
+		h.respondError(w, http.StatusNotFound, "Team or user not found")
+		return
+	}
+
+	// Adding someone who is already on the team is not an error; the caller's intent is
+	// already satisfied.
+	if _, err := h.db.Exec(`
+		INSERT INTO user_group_members (user_id, group_id, added_by)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (user_id, group_id) DO NOTHING
+	`, req.UserID, groupID, claims.UserID); err != nil {
+		h.respondError(w, http.StatusInternalServerError, "Failed to add member")
+		return
+	}
+
+	h.audit.Log(claims.OrgID, claims.UserID, claims.Email, "add_group_member", "group", groupID, map[string]any{
+		"user_id": req.UserID,
+		"email":   email,
+	}, r.RemoteAddr)
+	h.respondJSON(w, http.StatusOK, map[string]string{"message": "Member added successfully"})
+}
+
+// RemoveGroupMember takes an admin off a team, revoking the visibility it granted.
+func (h *Handler) RemoveGroupMember(w http.ResponseWriter, r *http.Request) {
+	claims, _ := middleware.GetUserClaims(r)
+	groupID := pathSegment(r, 2)
+	userID := pathSegment(r, 4)
+	if groupID == "" || pathSegment(r, 3) != "members" || userID == "" {
+		h.respondError(w, http.StatusBadRequest, "Invalid path")
+		return
+	}
+
+	res, err := h.db.Exec(`
+		DELETE FROM user_group_members m
+		USING device_groups g
+		WHERE m.group_id = g.id AND m.group_id = $1 AND m.user_id = $2 AND g.org_id = $3
+	`, groupID, userID, claims.OrgID)
+	if err != nil {
+		h.respondError(w, http.StatusInternalServerError, "Failed to remove member")
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		h.respondError(w, http.StatusNotFound, "Membership not found")
+		return
+	}
+
+	h.audit.Log(claims.OrgID, claims.UserID, claims.Email, "remove_group_member", "group", groupID, map[string]any{
+		"user_id": userID,
+	}, r.RemoteAddr)
+	h.respondJSON(w, http.StatusOK, map[string]string{"message": "Member removed successfully"})
 }
 
 // Sessions and audit
@@ -674,8 +1017,11 @@ func (h *Handler) ListSessions(w http.ResponseWriter, r *http.Request) {
 		LEFT JOIN users u ON s.admin_id = u.id
 		WHERE d.org_id = $1`
 	args := []any{claims.OrgID}
+	// An Admin sees their own sessions plus any session on a device they can see, so a
+	// team lead can review what happened on their team's machines rather than only what
+	// they personally did.
 	if claims.Role != models.RoleSuperAdmin {
-		query += ` AND s.admin_id = $2`
+		query += ` AND (s.admin_id = $2 OR ` + visibleDevicesClause("$2") + `)`
 		args = append(args, claims.UserID)
 	}
 	query += ` ORDER BY s.started_at DESC LIMIT 100`

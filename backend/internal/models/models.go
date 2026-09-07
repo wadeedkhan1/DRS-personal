@@ -48,13 +48,25 @@ type User struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
+// DeviceGroup is a team: a set of devices, and a set of admins who can therefore see
+// them. The counts are computed per query rather than stored.
 type DeviceGroup struct {
 	ID          string    `json:"id"`
 	OrgID       string    `json:"org_id"`
 	Name        string    `json:"name"`
 	Description string    `json:"description"`
 	CreatedAt   time.Time `json:"created_at"`
-	DeviceCount int       `json:"device_count,omitempty"`
+	DeviceCount int       `json:"device_count"`
+	MemberCount int       `json:"member_count"`
+}
+
+// GroupMember is one admin on a team. It is a projection of user_group_members joined to
+// users, since the membership row on its own says nothing a UI can display.
+type GroupMember struct {
+	UserID    string    `json:"user_id"`
+	Email     string    `json:"email"`
+	Role      string    `json:"role"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type Device struct {
@@ -133,6 +145,18 @@ type CreateGroupRequest struct {
 	Description string `json:"description"`
 }
 
+// UpdateGroupRequest patches a team. Both fields are pointers so that omitting one
+// leaves it alone rather than blanking it, which matters for description: renaming a
+// team should not silently erase what it is for.
+type UpdateGroupRequest struct {
+	Name        *string `json:"name,omitempty"`
+	Description *string `json:"description,omitempty"`
+}
+
+type AddGroupMemberRequest struct {
+	UserID string `json:"user_id"`
+}
+
 type GenerateEnrollmentTokenRequest struct {
 	DeviceType string  `json:"device_type"` // windows, android
 	GroupID    *string `json:"group_id,omitempty"`
@@ -154,9 +178,9 @@ type EnrollDeviceRequest struct {
 	OSVersion       string          `json:"os_version"`
 	Metadata        json.RawMessage `json:"metadata,omitempty"`
 
-	// Capabilities the person installing the agent consented to. Pointers so "not sent"
-	// is distinct from "sent false": an older CLI agent omits them and gets the safe
-	// defaults (screen on, terminal off); the GUI agent always sends both explicitly.
+	// Capabilities this device is enrolled with. Pointers so "not sent" is distinct from
+	// "sent false": the Android agent omits them and gets the defaults (screen on,
+	// terminal off), while the Windows agent always sends both as true.
 	AllowScreen   *bool `json:"allow_screen,omitempty"`
 	AllowTerminal *bool `json:"allow_terminal,omitempty"`
 }

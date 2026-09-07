@@ -20,6 +20,7 @@ type Device struct {
 	Name            string
 	Type            string
 	AssignedAdminID *string
+	GroupID         *string
 	AllowScreen     bool
 	AllowTerminal   bool
 }
@@ -31,6 +32,9 @@ type DeviceStore interface {
 	// apart would let an attacker enumerate valid device ids.
 	AuthenticateAgent(ctx context.Context, deviceID, secret string) (Device, bool, error)
 	Lookup(ctx context.Context, deviceID string) (Device, bool, error)
+	// GroupsForUser is the set of team ids a portal user belongs to, which is half of
+	// the RBAC rule in canViewDevice.
+	GroupsForUser(ctx context.Context, userID string) (map[string]bool, error)
 	SetStatus(ctx context.Context, deviceID, status, ip string) error
 	RecordHeartbeat(ctx context.Context, deviceID, ip string, hb protocol.Heartbeat) error
 }
@@ -59,9 +63,10 @@ func (s *SQLStore) AuthenticateAgent(ctx context.Context, deviceID, secret strin
 	var dev Device
 	var hash sql.NullString
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, org_id, name, type, assigned_admin_id, agent_secret_hash
+		SELECT id, org_id, name, type, assigned_admin_id, group_id, agent_secret_hash
 		FROM devices WHERE id = $1
-	`, deviceID).Scan(&dev.ID, &dev.OrgID, &dev.Name, &dev.Type, &dev.AssignedAdminID, &hash)
+	`, deviceID).Scan(&dev.ID, &dev.OrgID, &dev.Name, &dev.Type, &dev.AssignedAdminID,
+		&dev.GroupID, &hash)
 
 	if err == sql.ErrNoRows {
 		return Device{}, false, nil
@@ -85,10 +90,10 @@ func (s *SQLStore) Lookup(ctx context.Context, deviceID string) (Device, bool, e
 	}
 	var dev Device
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, org_id, name, type, assigned_admin_id, allow_screen, allow_terminal
+		SELECT id, org_id, name, type, assigned_admin_id, group_id, allow_screen, allow_terminal
 		FROM devices WHERE id = $1
 	`, deviceID).Scan(&dev.ID, &dev.OrgID, &dev.Name, &dev.Type, &dev.AssignedAdminID,
-		&dev.AllowScreen, &dev.AllowTerminal)
+		&dev.GroupID, &dev.AllowScreen, &dev.AllowTerminal)
 	if err == sql.ErrNoRows {
 		return Device{}, false, nil
 	}
@@ -96,6 +101,35 @@ func (s *SQLStore) Lookup(ctx context.Context, deviceID string) (Device, bool, e
 		return Device{}, false, err
 	}
 	return dev, true, nil
+}
+
+// GroupsForUser returns the team ids a user belongs to, as a set.
+//
+// The caller reads this once per socket rather than once per check. A session open does
+// it alongside the device lookup it already performs; the presence socket does it at
+// upgrade time and holds the result for the life of the connection, because the whole
+// reason DeviceMeta carries assignment fields is to keep per-event filtering off the
+// database.
+func (s *SQLStore) GroupsForUser(ctx context.Context, userID string) (map[string]bool, error) {
+	groups := make(map[string]bool)
+	if _, err := uuid.Parse(userID); err != nil {
+		return groups, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT group_id FROM user_group_members WHERE user_id = $1
+	`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		groups[id] = true
+	}
+	return groups, rows.Err()
 }
 
 // SetStatus records online/offline transitions durably, so the dashboard is right

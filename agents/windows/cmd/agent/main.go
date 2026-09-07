@@ -54,10 +54,8 @@ func runEnroll() {
 	server := flag.String("server", "", "DRS server base URL, e.g. https://drs.example.com")
 	token := flag.String("token", "", "Enrollment token from the portal")
 	name := flag.String("name", "", "Device name (defaults to this machine's hostname)")
-	// The GUI is the normal way to choose these; the flags exist so the CLI path can too.
-	// The defaults match the server's: screen on, terminal off.
-	screen := flag.Bool("screen", true, "allow screen sharing")
-	terminal := flag.Bool("terminal", false, "allow remote terminal access")
+	// There are deliberately no capability flags: every enrollment requests screen and
+	// terminal, so the CLI and GUI paths cannot produce differently-capable devices.
 	flag.Parse()
 
 	if *server == "" || *token == "" {
@@ -65,7 +63,7 @@ func runEnroll() {
 			"example: drs-agent enroll -server https://drs.example.com -token DRS-ABC123")
 	}
 
-	cfg, err := enroll.Enroll(*server, *token, *name, *screen, *terminal)
+	cfg, err := enroll.Enroll(*server, *token, *name)
 	if err != nil {
 		fatalf("enrollment failed: %v", err)
 	}

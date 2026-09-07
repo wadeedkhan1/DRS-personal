@@ -97,13 +97,21 @@ func (h *Hub) authenticateBrowser(w http.ResponseWriter, r *http.Request) (*auth
 	return claims, true
 }
 
-// canViewDevice is the RBAC rule from SRS FR-1.3 and FR-1.4: a Super Admin sees every
-// device, an Admin only the devices assigned to them.
-func canViewDevice(claims *auth.JWTClaims, device Device) bool {
+// canViewDevice is the RBAC rule from SRS FR-1.3, FR-1.4 and FR-6.4: a Super Admin sees
+// every device; an Admin sees a device assigned to them, or one that sits in a team they
+// belong to.
+//
+// The team half is additive, not a replacement. An Admin who is on no team keeps exactly
+// the access they had before teams meant anything, so an empty user_group_members table
+// cannot lock anybody out.
+func canViewDevice(claims *auth.JWTClaims, device Device, viewerGroups map[string]bool) bool {
 	if claims.Role == models.RoleSuperAdmin {
 		return true
 	}
-	return device.AssignedAdminID != nil && *device.AssignedAdminID == claims.UserID
+	if device.AssignedAdminID != nil && *device.AssignedAdminID == claims.UserID {
+		return true
+	}
+	return device.GroupID != nil && viewerGroups[*device.GroupID]
 }
 
 // ServeSession handles one operator watching one device.
@@ -124,9 +132,17 @@ func (h *Hub) ServeSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "lookup failed", http.StatusInternalServerError)
 		return
 	}
+	// Membership is read live on every session open rather than trusted from the JWT.
+	// Putting team ids in the token would mean a 24h window in which removing someone
+	// from a team did not actually remove their access, and there is no revocation list.
+	viewerGroups, err := h.devices.GroupsForUser(r.Context(), claims.UserID)
+	if err != nil {
+		http.Error(w, "lookup failed", http.StatusInternalServerError)
+		return
+	}
 	// A device the operator may not see and a device that does not exist get the same
 	// answer, so the endpoint cannot be used to enumerate other admins' devices.
-	if !found || !canViewDevice(claims, device) {
+	if !found || !canViewDevice(claims, device, viewerGroups) {
 		http.Error(w, "device not found", http.StatusNotFound)
 		return
 	}
@@ -374,6 +390,22 @@ func (h *Hub) ServePresence(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The viewer's team memberships are read once, here, and held for the life of the
+	// socket. Presence carries the assignment fields on every event precisely so that
+	// filtering costs no database round trip per event per subscriber, and re-querying
+	// membership per event would give that back.
+	//
+	// The cost is bounded and deliberate: dropping an Admin from a team does not cut
+	// their presence feed until they reconnect, so for the rest of that socket's life
+	// they can still see whether a device they no longer have access to is online. Every
+	// path that exposes actual data — the REST list, and opening /ws/session — reads
+	// membership live, so nothing can be viewed or run on that basis.
+	viewerGroups, err := h.devices.GroupsForUser(r.Context(), claims.UserID)
+	if err != nil {
+		http.Error(w, "lookup failed", http.StatusInternalServerError)
+		return
+	}
+
 	upgrader := h.browserUpgrader()
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -389,7 +421,7 @@ func (h *Hub) ServePresence(w http.ResponseWriter, r *http.Request) {
 	// Send the current state immediately, so a dashboard that connects mid-flight is
 	// correct without waiting for the next transition.
 	for deviceID, p := range h.presence.GetAllOnlineDevices() {
-		if !visibleToAdmin(claims, p.OrgID, p.AssignedAdminID) {
+		if !visibleToAdmin(claims, p.OrgID, p.AssignedAdminID, p.GroupID, viewerGroups) {
 			continue
 		}
 		_ = sock.sendEnvelope(protocol.TypePresenceUpdate, protocol.PresenceUpdate{
@@ -420,7 +452,7 @@ func (h *Hub) ServePresence(w http.ResponseWriter, r *http.Request) {
 			if !open {
 				return
 			}
-			if !visibleToAdmin(claims, event.OrgID, event.AssignedAdminID) {
+			if !visibleToAdmin(claims, event.OrgID, event.AssignedAdminID, event.GroupID, viewerGroups) {
 				continue
 			}
 			if err := sock.sendEnvelope(protocol.TypePresenceUpdate, protocol.PresenceUpdate{
@@ -435,12 +467,18 @@ func (h *Hub) ServePresence(w http.ResponseWriter, r *http.Request) {
 }
 
 // visibleToAdmin applies the same RBAC rule as canViewDevice to a presence event, so
-// an Admin is not told about devices belonging to another Admin.
-func visibleToAdmin(claims *auth.JWTClaims, orgID string, assignedAdminID *string) bool {
+// an Admin is not told about devices belonging to another Admin or another team.
+//
+// viewerGroups is the set the presence socket read once at upgrade time, not a fresh
+// lookup. See ServePresence for why, and for what that costs.
+func visibleToAdmin(claims *auth.JWTClaims, orgID string, assignedAdminID, groupID *string, viewerGroups map[string]bool) bool {
 	if claims.Role == models.RoleSuperAdmin {
 		return orgID == "" || orgID == claims.OrgID
 	}
-	return assignedAdminID != nil && *assignedAdminID == claims.UserID
+	if assignedAdminID != nil && *assignedAdminID == claims.UserID {
+		return true
+	}
+	return groupID != nil && viewerGroups[*groupID]
 }
 
 func short(id string) string {

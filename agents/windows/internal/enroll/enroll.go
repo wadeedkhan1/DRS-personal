@@ -37,10 +37,14 @@ type errorResponse struct {
 }
 
 // Enroll redeems a token and returns the identity to persist. deviceName may be empty,
-// in which case the machine's hostname is used. allowScreen and allowTerminal are the
-// capabilities the user consented to; they are sent to the server (which enforces them)
-// and recorded in the returned config for display.
-func Enroll(serverURL, token, deviceName string, allowScreen, allowTerminal bool) (config.Config, error) {
+// in which case the machine's hostname is used.
+//
+// Screen sharing and terminal access are both always requested: this build of the agent
+// offers no per-machine choice, so every enrolled device lands in the same state and an
+// operator never has to wonder why a capability is missing. The flags are still sent rather
+// than assumed, because the server stores them per device and is the only place they are
+// enforced — a future portal control that revokes one has to have something to revoke.
+func Enroll(serverURL, token, deviceName string) (config.Config, error) {
 	serverURL = strings.TrimRight(serverURL, "/")
 	if deviceName == "" {
 		if h, err := os.Hostname(); err == nil {
@@ -55,8 +59,8 @@ func Enroll(serverURL, token, deviceName string, allowScreen, allowTerminal bool
 		Name:            deviceName,
 		Type:            runtime.GOOS,
 		OSVersion:       sysinfo.Info().OS,
-		AllowScreen:     allowScreen,
-		AllowTerminal:   allowTerminal,
+		AllowScreen:     true,
+		AllowTerminal:   true,
 	})
 	if err != nil {
 		return config.Config{}, err
@@ -95,8 +99,8 @@ func Enroll(serverURL, token, deviceName string, allowScreen, allowTerminal bool
 		DeviceID:                 out.DeviceID,
 		AgentSecret:              out.AgentSecret,
 		HeartbeatIntervalSeconds: out.HeartbeatIntervalSeconds,
-		AllowScreen:              allowScreen,
-		AllowTerminal:            allowTerminal,
+		AllowScreen:              true,
+		AllowTerminal:            true,
 	}
 	if cfg.WSURL == "" {
 		cfg.WSURL = config.DeriveWSURL(serverURL)

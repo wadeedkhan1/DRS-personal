@@ -6,7 +6,7 @@ The endpoint agent for Windows desktops. It enrolls once, then keeps a single ou
 WebSocket open to the backend and waits to be told what to do. When an operator opens the
 device in the portal it captures the primary display, encodes VP8, and streams it
 **peer-to-peer to the browser** — the video never passes through the server. It can also run
-one-shot shell commands on request, if the machine consented to that at enrollment.
+one-shot shell commands on request.
 
 ---
 
@@ -33,13 +33,21 @@ the PE subsystem is GUI (no console window), and that libvpx was linked statical
 ## How it works
 
 ### 1. Enrollment (once)
-The user pastes the invite link (`https://server/enroll?token=DRS-…`) into the GUI, ticks
-what the machine may expose (**screen** default on, **terminal** default off), and clicks
+The user pastes the invite link (`https://server/enroll?token=DRS-…`) into the GUI and clicks
 Connect. `internal/enroll` POSTs `/api/devices/enroll` and gets back `deviceId`,
 `agentSecret`, `wsUrl`, and the heartbeat interval. That identity is written **0600** to
 `%AppData%\drs\agent.json` (`internal/config`). Logs go next to it, `agent.log`.
 
-The same thing is available headless: `drs-agent enroll -server … -token … [-screen] [-terminal]`.
+The enroll request always sends `allow_screen: true` and `allow_terminal: true` — there is no
+per-machine capability picker in the GUI and no `-screen` / `-terminal` flags on the CLI, so
+every device enrolled by this build lands fully capable and the two paths cannot disagree. The
+enroll screen states what that allows instead of asking. The flags are still sent rather than
+left to the server's defaults, because the **server** is the only place they are enforced —
+it stores them per device and checks them on every session. Changing them for a device that is
+already enrolled currently means re-enrolling it (or editing the row); there is no portal
+control for it yet.
+
+The same thing is available headless: `drs-agent enroll -server … -token … [-name …]`.
 
 ### 2. Staying connected
 `internal/conn` dials `wsUrl`, sends `hello` (device id + secret), and expects `welcome`.

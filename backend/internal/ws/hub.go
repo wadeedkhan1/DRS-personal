@@ -326,6 +326,7 @@ func (h *Hub) registerAgent(ac *agentConn) {
 		Type:            ac.device.Type,
 		IPAddress:       ac.ip,
 		AssignedAdminID: ac.device.AssignedAdminID,
+		GroupID:         ac.device.GroupID,
 	})
 	if err := h.devices.SetStatus(context.Background(), ac.device.ID, models.DeviceStatusOnline, ac.ip); err != nil {
 		log.Printf("[WS WARN] could not mark %s online: %v", ac.device.ID, err)

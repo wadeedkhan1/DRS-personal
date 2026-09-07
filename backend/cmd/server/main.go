@@ -114,6 +114,9 @@ func main() {
 	mux.Handle("GET /api/devices", protected(anyAdmin, h.ListDevices))
 	mux.Handle("GET /api/devices/", protected(anyAdmin, h.GetDevice))
 	mux.Handle("GET /api/groups", protected(anyAdmin, h.ListGroups))
+	// Reading a team's members is scoped inside the handler the same way ListGroups is,
+	// so an Admin can see who else is on their team without being able to change it.
+	mux.Handle("GET /api/groups/", protected(anyAdmin, h.ListGroupMembers))
 	mux.Handle("GET /api/sessions", protected(anyAdmin, h.ListSessions))
 	mux.Handle("GET /api/audit-logs", protected(anyAdmin, h.ListAuditLogs))
 	mux.Handle("GET /api/reports/usage", protected(anyAdmin, h.GetUsageReport))
@@ -124,6 +127,12 @@ func main() {
 	mux.Handle("PUT /api/devices/", protected(superAdminOnly, h.AssignDevice))
 	mux.Handle("DELETE /api/devices/", protected(superAdminOnly, h.DeleteDevice))
 	mux.Handle("POST /api/groups", protected(superAdminOnly, h.CreateGroup))
+	mux.Handle("POST /api/groups/", protected(superAdminOnly, h.AddGroupMember))
+	mux.Handle("PATCH /api/groups/", protected(superAdminOnly, h.UpdateGroup))
+	// One DELETE handler per prefix is all the mux allows, so this one dispatches on the
+	// path itself: /api/groups/{id} deletes a team, /api/groups/{id}/members/{userId}
+	// removes a member.
+	mux.Handle("DELETE /api/groups/", protected(superAdminOnly, h.DeleteGroupOrMember))
 	mux.Handle("GET /api/users", protected(superAdminOnly, h.ListUsers))
 	mux.Handle("POST /api/users", protected(superAdminOnly, h.CreateUser))
 	mux.Handle("DELETE /api/users/", protected(superAdminOnly, h.DeleteUser))

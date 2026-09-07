@@ -1,26 +1,21 @@
 import React from 'react';
+import { NavLink } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { Monitor, Users, FolderKanban, History, BarChart3, Tv } from 'lucide-react';
+import { Monitor, Users, FolderKanban, History, BarChart3, Tv, Clock } from 'lucide-react';
 
-interface SidebarProps {
-  currentTab: string;
-  onTabChange: (tab: string) => void;
-}
-
-export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => {
+export const Sidebar: React.FC = () => {
   const { isSuperAdmin } = useAuth();
 
+  // Teams is visible to both roles now that membership grants access: an Admin sees the
+  // teams they are on, read-only, which is how they find out why they can see a device.
   const navItems = [
-    { id: 'devices', label: 'Endpoints / Devices', icon: Monitor },
-    { id: 'viewer', label: 'Live Screen Viewer', icon: Tv },
-    ...(isSuperAdmin
-      ? [
-          { id: 'users', label: 'Admin Accounts', icon: Users },
-          { id: 'groups', label: 'Teams & Groups', icon: FolderKanban },
-        ]
-      : []),
-    { id: 'audit', label: 'Audit Trail', icon: History },
-    { id: 'reports', label: 'Usage Reports', icon: BarChart3 },
+    { to: '/devices', label: 'Endpoints / Devices', icon: Monitor },
+    { to: '/viewer', label: 'Live Screen Viewer', icon: Tv },
+    { to: '/teams', label: 'Teams & Groups', icon: FolderKanban },
+    ...(isSuperAdmin ? [{ to: '/users', label: 'Admin Accounts', icon: Users }] : []),
+    { to: '/sessions', label: 'Session History', icon: Clock },
+    { to: '/audit', label: 'Audit Trail', icon: History },
+    { to: '/reports', label: 'Usage Reports', icon: BarChart3 },
   ];
 
   return (
@@ -32,20 +27,25 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onTabChange }) => 
         <nav className="space-y-1">
           {navItems.map((item) => {
             const Icon = item.icon;
-            const active = currentTab === item.id;
             return (
-              <button
-                key={item.id}
-                onClick={() => onTabChange(item.id)}
-                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all ${
-                  active
-                    ? 'bg-sky-500/10 text-sky-400 border border-sky-500/20 shadow-sm shadow-sky-500/10'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-                }`}
+              <NavLink
+                key={item.to}
+                to={item.to}
+                className={({ isActive }) =>
+                  `w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all ${
+                    isActive
+                      ? 'bg-sky-500/10 text-sky-400 border border-sky-500/20 shadow-sm shadow-sky-500/10'
+                      : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+                  }`
+                }
               >
-                <Icon className={`w-4 h-4 ${active ? 'text-sky-400' : 'text-slate-400'}`} />
-                <span>{item.label}</span>
-              </button>
+                {({ isActive }) => (
+                  <>
+                    <Icon className={`w-4 h-4 ${isActive ? 'text-sky-400' : 'text-slate-400'}`} />
+                    <span>{item.label}</span>
+                  </>
+                )}
+              </NavLink>
             );
           })}
         </nav>

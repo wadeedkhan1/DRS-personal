@@ -27,11 +27,16 @@ var (
 // DeviceMeta is what the hub knows about a device the moment it connects. It travels
 // with the presence record so that presence events can be filtered by RBAC without a
 // database round trip per event per subscriber.
+//
+// GroupID is carried for the same reason as AssignedAdminID: an Admin may see a device
+// because it belongs to a team they are on, and deciding that per event per subscriber
+// would otherwise mean a query per event per subscriber.
 type DeviceMeta struct {
 	OrgID           string
 	Type            string
 	IPAddress       string
 	AssignedAdminID *string
+	GroupID         *string
 }
 
 // DevicePresence is the live state of one device.
@@ -44,6 +49,7 @@ type DevicePresence struct {
 	Status          string    `json:"status"` // online, offline, in_session
 	ActiveSessionID string    `json:"active_session_id,omitempty"`
 	AssignedAdminID *string   `json:"assigned_admin_id,omitempty"`
+	GroupID         *string   `json:"group_id,omitempty"`
 }
 
 // ActiveSession is one live monitoring session.
@@ -55,9 +61,9 @@ type ActiveSession struct {
 	StartedAt time.Time `json:"started_at"`
 }
 
-// PresenceEvent is broadcast to subscribers on every state change. AssignedAdminID
-// and OrgID are carried so a subscriber can be filtered by RBAC at the point of
-// delivery.
+// PresenceEvent is broadcast to subscribers on every state change. OrgID,
+// AssignedAdminID and GroupID are carried so a subscriber can be filtered by RBAC at the
+// point of delivery.
 type PresenceEvent struct {
 	Type            string    `json:"type"` // device_online, device_offline, session_start, session_end
 	DeviceID        string    `json:"device_id"`
@@ -65,6 +71,7 @@ type PresenceEvent struct {
 	SessionID       string    `json:"session_id,omitempty"`
 	OrgID           string    `json:"org_id,omitempty"`
 	AssignedAdminID *string   `json:"assigned_admin_id,omitempty"`
+	GroupID         *string   `json:"group_id,omitempty"`
 	Timestamp       time.Time `json:"timestamp"`
 }
 
@@ -72,6 +79,9 @@ type PresenceEvent struct {
 type PresenceStore interface {
 	SetDeviceOnline(deviceID string, meta DeviceMeta) *DevicePresence
 	Touch(deviceID string, ip string)
+	// UpdateDeviceAssignment re-points a live device at a new admin/team without waiting
+	// for its agent to reconnect. See the implementation for why that matters.
+	UpdateDeviceAssignment(deviceID string, adminID, groupID *string)
 	SetDeviceOffline(deviceID string)
 	IsDeviceOnline(deviceID string) bool
 	GetDevicePresence(deviceID string) (*DevicePresence, bool)
@@ -122,6 +132,7 @@ func (s *MemoryStore) SetDeviceOnline(deviceID string, meta DeviceMeta) *DeviceP
 	p.Type = meta.Type
 	p.IPAddress = meta.IPAddress
 	p.AssignedAdminID = meta.AssignedAdminID
+	p.GroupID = meta.GroupID
 	p.LastSeenAt = time.Now()
 
 	if _, inSess := s.deviceSess[deviceID]; inSess {
@@ -137,6 +148,7 @@ func (s *MemoryStore) SetDeviceOnline(deviceID string, meta DeviceMeta) *DeviceP
 		Status:          p.Status,
 		OrgID:           p.OrgID,
 		AssignedAdminID: p.AssignedAdminID,
+		GroupID:         p.GroupID,
 		Timestamp:       time.Now(),
 	}
 	subs := s.subscriberSnapshotLocked()
@@ -163,6 +175,25 @@ func (s *MemoryStore) Touch(deviceID string, ip string) {
 	}
 }
 
+// UpdateDeviceAssignment re-points a live device at a new admin and team.
+//
+// Presence meta is otherwise written only when an agent connects, so before this existed
+// reassigning a device that was already online left the presence record pointing at the
+// previous admin until that agent happened to reconnect. While groups were a caption that
+// was a cosmetic staleness. Now that team membership grants visibility, it is the
+// difference between revoking someone's access and believing you had.
+//
+// A device that is not currently online has no presence record to correct; the next
+// SetDeviceOnline reads the fresh row from the database anyway.
+func (s *MemoryStore) UpdateDeviceAssignment(deviceID string, adminID, groupID *string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p, ok := s.devices[deviceID]; ok {
+		p.AssignedAdminID = adminID
+		p.GroupID = groupID
+	}
+}
+
 // SetDeviceOffline removes a device and tears down any session it was in.
 func (s *MemoryStore) SetDeviceOffline(deviceID string) {
 	s.mu.Lock()
@@ -172,6 +203,7 @@ func (s *MemoryStore) SetDeviceOffline(deviceID string) {
 	}
 	orgID := s.devices[deviceID].OrgID
 	assigned := s.devices[deviceID].AssignedAdminID
+	group := s.devices[deviceID].GroupID
 	delete(s.devices, deviceID)
 
 	if sessID, inSess := s.deviceSess[deviceID]; inSess {
@@ -185,6 +217,7 @@ func (s *MemoryStore) SetDeviceOffline(deviceID string) {
 		Status:          models.DeviceStatusOffline,
 		OrgID:           orgID,
 		AssignedAdminID: assigned,
+		GroupID:         group,
 		Timestamp:       time.Now(),
 	}
 	subs := s.subscriberSnapshotLocked()
@@ -255,6 +288,7 @@ func (s *MemoryStore) RegisterSession(sessionID, deviceID, adminID, mode string)
 		dev.ActiveSessionID = sessionID
 		event.OrgID = dev.OrgID
 		event.AssignedAdminID = dev.AssignedAdminID
+		event.GroupID = dev.GroupID
 	}
 	snapshot := *sess
 	subs := s.subscriberSnapshotLocked()
@@ -290,6 +324,7 @@ func (s *MemoryStore) EndSession(sessionID string) (*ActiveSession, bool) {
 		dev.ActiveSessionID = ""
 		event.OrgID = dev.OrgID
 		event.AssignedAdminID = dev.AssignedAdminID
+		event.GroupID = dev.GroupID
 	}
 	snapshot := *sess
 	subs := s.subscriberSnapshotLocked()

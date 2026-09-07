@@ -1,9 +1,11 @@
 import React, { useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 import { useDevices } from '../context/DeviceContext';
 import { useAuth } from '../context/AuthContext';
 import { Device } from '../types';
 import { StatusBadge } from '../components/StatusBadge';
 import { EnrollDeviceModal } from '../components/EnrollDeviceModal';
+import { AssignDeviceModal } from '../components/AssignDeviceModal';
 import { ApiClient } from '../api/client';
 import {
   Monitor,
@@ -13,20 +15,21 @@ import {
   Play,
   RefreshCw,
   Trash2,
+  UserCog,
+  FolderKanban,
 } from 'lucide-react';
 
-interface DashboardPageProps {
-  onSelectDeviceForStream: (device: Device) => void;
-}
-
-export const DashboardPage: React.FC<DashboardPageProps> = ({ onSelectDeviceForStream }) => {
-  const { devices, refreshDevices } = useDevices();
+export const DashboardPage: React.FC = () => {
+  const { devices, groups, refreshDevices } = useDevices();
   const { isSuperAdmin } = useAuth();
+  const navigate = useNavigate();
 
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [typeFilter, setTypeFilter] = useState<string>('all');
+  const [groupFilter, setGroupFilter] = useState<string>('all');
   const [isEnrollModalOpen, setIsEnrollModalOpen] = useState(false);
+  const [assigningDevice, setAssigningDevice] = useState<Device | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const handleDelete = async (device: Device) => {
@@ -57,8 +60,13 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onSelectDeviceForS
 
     const matchesStatus = statusFilter === 'all' || d.status === statusFilter;
     const matchesType = typeFilter === 'all' || d.type === typeFilter;
+    // 'none' picks out the devices no team owns, which is the set worth finding after a
+    // team is deleted.
+    const matchesGroup =
+      groupFilter === 'all' ||
+      (groupFilter === 'none' ? !d.group_id : d.group_id === groupFilter);
 
-    return matchesSearch && matchesStatus && matchesType;
+    return matchesSearch && matchesStatus && matchesType && matchesGroup;
   });
 
   const onlineCount = devices.filter((d) => d.status === 'online').length;
@@ -130,7 +138,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onSelectDeviceForS
           />
         </div>
 
-        <div className="flex items-center gap-3 w-full md:w-auto">
+        <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
           {/* Status Filter */}
           <select
             value={statusFilter}
@@ -152,6 +160,21 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onSelectDeviceForS
             <option value="all">All Platforms</option>
             <option value="windows">Windows</option>
             <option value="android">Android</option>
+          </select>
+
+          {/* Team Filter */}
+          <select
+            value={groupFilter}
+            onChange={(e) => setGroupFilter(e.target.value)}
+            className="px-3 py-2 rounded-xl bg-slate-950/60 border border-slate-800 text-xs text-slate-300 focus:outline-none focus:border-sky-500"
+          >
+            <option value="all">All Teams</option>
+            {groups.map((g) => (
+              <option key={g.id} value={g.id}>
+                {g.name}
+              </option>
+            ))}
+            <option value="none">No team</option>
           </select>
         </div>
       </div>
@@ -227,6 +250,20 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onSelectDeviceForS
                       <span className="text-slate-500">Assigned Admin:</span>
                       <span className="text-slate-300">{device.assigned_admin_email || 'Unassigned'}</span>
                     </div>
+                    <div className="flex justify-between items-center gap-2">
+                      <span className="text-slate-500">Team:</span>
+                      {device.group_id && device.group_name ? (
+                        <Link
+                          to={`/teams/${device.group_id}`}
+                          className="inline-flex items-center gap-1.5 text-sky-400 hover:text-sky-300 truncate"
+                        >
+                          <FolderKanban className="w-3 h-3 shrink-0" />
+                          <span className="truncate">{device.group_name}</span>
+                        </Link>
+                      ) : (
+                        <span className="text-slate-500">No team</span>
+                      )}
+                    </div>
                     <div className="flex justify-between">
                       <span className="text-slate-500">Last Active:</span>
                       <span className="text-slate-300">
@@ -239,7 +276,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onSelectDeviceForS
                 <div className="pt-3 border-t border-slate-800/80 flex items-center gap-2">
                   <button
                     disabled={!isOnline}
-                    onClick={() => onSelectDeviceForStream(device)}
+                    onClick={() => navigate(`/devices/${device.id}/live`)}
                     className="flex-1 py-2 px-3 rounded-xl bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 border border-sky-500/30 text-xs font-semibold flex items-center justify-center gap-2 transition-all disabled:opacity-30 disabled:pointer-events-none"
                   >
                     <Play className="w-3.5 h-3.5 fill-current" />
@@ -247,15 +284,23 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onSelectDeviceForS
                   </button>
 
                   {isSuperAdmin && (
-                    <button
-                      disabled={deletingId === device.id}
-                      onClick={() => handleDelete(device)}
-                      title="Delete device"
-                      className="py-2 px-3 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 text-xs font-semibold flex items-center justify-center gap-2 transition-all disabled:opacity-40 disabled:pointer-events-none"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                      <span>{deletingId === device.id ? 'Deleting…' : 'Delete'}</span>
-                    </button>
+                    <>
+                      <button
+                        onClick={() => setAssigningDevice(device)}
+                        title="Assign admin & team"
+                        className="py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700/60 transition-colors"
+                      >
+                        <UserCog className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        disabled={deletingId === device.id}
+                        onClick={() => handleDelete(device)}
+                        title="Delete device"
+                        className="py-2 px-3 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 transition-all disabled:opacity-40 disabled:pointer-events-none"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </>
                   )}
                 </div>
               </div>
@@ -269,6 +314,8 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onSelectDeviceForS
         onClose={() => setIsEnrollModalOpen(false)}
         onEnrolled={() => refreshDevices()}
       />
+
+      <AssignDeviceModal device={assigningDevice} onClose={() => setAssigningDevice(null)} />
     </div>
   );
 };

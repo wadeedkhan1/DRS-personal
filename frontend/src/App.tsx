@@ -1,62 +1,53 @@
-import React, { useState } from 'react';
-import { useAuth } from './context/AuthContext';
+import React from 'react';
+import { Navigate, Route, Routes } from 'react-router-dom';
 import { LoginPage } from './pages/LoginPage';
-import { Navbar } from './components/Navbar';
-import { Sidebar } from './components/Sidebar';
+import { EnrollLandingPage } from './pages/EnrollLandingPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { LiveViewerPage } from './pages/LiveViewerPage';
+import { LiveSessionPage } from './pages/LiveSessionPage';
+import { TeamsPage } from './pages/TeamsPage';
+import { TeamDetailPage } from './pages/TeamDetailPage';
 import { UsersPage } from './pages/UsersPage';
+import { SessionsPage } from './pages/SessionsPage';
 import { AuditLogsPage } from './pages/AuditLogsPage';
 import { ReportsPage } from './pages/ReportsPage';
-import { Device } from './types';
-import { DeviceProvider } from './context/DeviceContext';
+import { NotFoundPage } from './pages/NotFoundPage';
+import { AppLayout } from './routes/AppLayout';
+import { RequireAuth } from './routes/RequireAuth';
+import { RequireSuperAdmin } from './routes/RequireSuperAdmin';
 
-export const MainApp: React.FC = () => {
-  const { user, loading } = useAuth();
-  const [currentTab, setCurrentTab] = useState('devices');
-  const [streamDevice, setStreamDevice] = useState<Device | null>(null);
+/**
+ * The route table.
+ *
+ * This used to be a single `currentTab` string and a chain of `&&`, which meant the URL
+ * never changed: no deep links, no back button, and a refresh always landed on the device
+ * list even in the middle of a session. Every section now has a real path.
+ */
+export const MainApp: React.FC = () => (
+  <Routes>
+    {/* Public. /enroll is where an invite link points — see EnrollLandingPage. */}
+    <Route path="/login" element={<LoginPage />} />
+    <Route path="/enroll" element={<EnrollLandingPage />} />
 
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center text-slate-400">
-        <div className="flex flex-col items-center gap-3">
-          <div className="w-8 h-8 rounded-full border-2 border-sky-500 border-t-transparent animate-spin"></div>
-          <span className="text-xs font-mono">Initializing DRS Platform...</span>
-        </div>
-      </div>
-    );
-  }
+    <Route element={<RequireAuth />}>
+      <Route element={<AppLayout />}>
+        <Route index element={<Navigate to="/devices" replace />} />
+        <Route path="devices" element={<DashboardPage />} />
+        {/* Deep-linkable session. Pasting or refreshing this resolves the device by id. */}
+        <Route path="devices/:deviceId/live" element={<LiveSessionPage />} />
+        <Route path="viewer" element={<LiveViewerPage />} />
+        <Route path="teams" element={<TeamsPage />} />
+        <Route path="teams/:groupId" element={<TeamDetailPage />} />
+        <Route path="sessions" element={<SessionsPage />} />
+        <Route path="audit" element={<AuditLogsPage />} />
+        <Route path="reports" element={<ReportsPage />} />
 
-  if (!user) {
-    return <LoginPage />;
-  }
+        <Route element={<RequireSuperAdmin />}>
+          <Route path="users" element={<UsersPage />} />
+        </Route>
 
-  const handleSelectDeviceForStream = (dev: Device) => {
-    setStreamDevice(dev);
-    setCurrentTab('viewer');
-  };
-
-  return (
-    <DeviceProvider>
-      <div className="min-h-screen bg-slate-950 flex flex-col">
-        <Navbar />
-        <div className="flex-1 flex overflow-hidden">
-          <Sidebar currentTab={currentTab} onTabChange={setCurrentTab} />
-          <main className="flex-1 overflow-y-auto p-8">
-            <div className="max-w-7xl mx-auto">
-              {currentTab === 'devices' && (
-                <DashboardPage onSelectDeviceForStream={handleSelectDeviceForStream} />
-              )}
-              {currentTab === 'viewer' && (
-                <LiveViewerPage selectedDevice={streamDevice} />
-              )}
-              {currentTab === 'users' && <UsersPage />}
-              {currentTab === 'audit' && <AuditLogsPage />}
-              {currentTab === 'reports' && <ReportsPage />}
-            </div>
-          </main>
-        </div>
-      </div>
-    </DeviceProvider>
-  );
-};
+        <Route path="*" element={<NotFoundPage />} />
+      </Route>
+    </Route>
+  </Routes>
+);

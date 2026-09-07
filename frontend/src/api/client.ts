@@ -1,4 +1,4 @@
-import { Device, DeviceGroup, Session, AuditLog, UsageReport, User } from '../types';
+import { Device, DeviceGroup, GroupMember, Session, AuditLog, UsageReport, User } from '../types';
 import { ICEServerConfig } from './protocol';
 
 const API_BASE = '/api';
@@ -101,7 +101,7 @@ export class ApiClient {
     });
   }
 
-  // Groups
+  // Teams / groups
   static async listGroups(): Promise<DeviceGroup[]> {
     return this.request<DeviceGroup[]>('/groups');
   }
@@ -111,6 +111,40 @@ export class ApiClient {
       method: 'POST',
       body: JSON.stringify({ name, description }),
     });
+  }
+
+  /**
+   * Patches a team. Omitted fields are left alone rather than blanked, so a rename does
+   * not have to restate the description.
+   */
+  static async updateGroup(
+    id: string,
+    changes: { name?: string; description?: string },
+  ): Promise<DeviceGroup> {
+    return this.request<DeviceGroup>(`/groups/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(changes),
+    });
+  }
+
+  static async deleteGroup(id: string): Promise<void> {
+    return this.request<void>(`/groups/${id}`, { method: 'DELETE' });
+  }
+
+  static async listGroupMembers(id: string): Promise<GroupMember[]> {
+    return this.request<GroupMember[]>(`/groups/${id}/members`);
+  }
+
+  /** Adding an admin to a team grants them every device in it. */
+  static async addGroupMember(id: string, userId: string): Promise<void> {
+    return this.request<void>(`/groups/${id}/members`, {
+      method: 'POST',
+      body: JSON.stringify({ user_id: userId }),
+    });
+  }
+
+  static async removeGroupMember(id: string, userId: string): Promise<void> {
+    return this.request<void>(`/groups/${id}/members/${userId}`, { method: 'DELETE' });
   }
 
   // Users (Super Admin)

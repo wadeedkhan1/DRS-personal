@@ -1,39 +1,25 @@
-import React, { useState, useEffect } from 'react';
+import React from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useDevices } from '../context/DeviceContext';
-import { Device } from '../types';
-import { ScreenViewer } from '../components/ScreenViewer';
 import { StatusBadge } from '../components/StatusBadge';
 import { Tv, Monitor, Smartphone, Play } from 'lucide-react';
 
 /**
  * Device picker for live viewing.
  *
- * Selecting a device only sets state; mounting ScreenViewer is what starts the session.
- * This page sends no signaling of its own, which is why a single click no longer
- * produces two competing session requests.
+ * Picking a device navigates to that device's own session URL; this page never mounts a
+ * viewer itself. Keeping exactly one component able to open a session is what stopped a
+ * single click from producing two competing session requests, and routing preserves that
+ * — LiveSessionPage is still the only mount point.
  */
-export const LiveViewerPage: React.FC<{ selectedDevice?: Device | null }> = ({
-  selectedDevice: initialDevice,
-}) => {
+export const LiveViewerPage: React.FC = () => {
   const { devices } = useDevices();
-  const [device, setDevice] = useState<Device | null>(initialDevice ?? null);
-
-  useEffect(() => {
-    if (initialDevice) setDevice(initialDevice);
-  }, [initialDevice]);
+  const navigate = useNavigate();
 
   // A device already in a session cannot be joined: the backend allows one viewer at a
   // time (SRS FR-5.3), so offering it here would only produce a refusal.
   const availableDevices = devices.filter((d) => d.status === 'online');
   const busyDevices = devices.filter((d) => d.status === 'in_session');
-
-  if (device) {
-    return (
-      <div className="h-[calc(100vh-8rem)] w-full">
-        <ScreenViewer device={device} onClose={() => setDevice(null)} />
-      </div>
-    );
-  }
 
   return (
     <div className="space-y-6">
@@ -79,7 +65,7 @@ export const LiveViewerPage: React.FC<{ selectedDevice?: Device | null }> = ({
               <div className="flex items-center gap-3">
                 <StatusBadge status={dev.status} />
                 <button
-                  onClick={() => setDevice(dev)}
+                  onClick={() => navigate(`/devices/${dev.id}/live`)}
                   className="p-2.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-white shadow-md shadow-sky-500/20 transition-all"
                   title="Start session"
                 >
