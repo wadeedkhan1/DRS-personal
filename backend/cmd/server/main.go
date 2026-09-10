@@ -93,6 +93,13 @@ func main() {
 	mux.HandleFunc("GET /health", h.Health)
 	mux.HandleFunc("POST /api/auth/login", h.Login)
 	mux.HandleFunc("POST /api/devices/enroll", h.EnrollDevice)
+	// Serving the agent has to be public too — whoever installs one generally has no
+	// portal account, which is why /enroll and the enroll endpoint are public already.
+	// These live under /api/ rather than beside nginx's static /downloads/ for two
+	// reasons: nginx only routes /api/, /ws/ and /health to the backend, and only the
+	// backend can bake this invite's server address and token into the binary.
+	mux.HandleFunc("GET /api/enroll/agent", h.DownloadAgent)
+	mux.HandleFunc("GET /api/enroll/availability", h.AgentAvailability)
 
 	// WebSocket endpoints authenticate themselves: the agent with a Hello frame, the
 	// browser with a JWT in the Sec-WebSocket-Protocol header. Neither can use the
@@ -122,8 +129,15 @@ func main() {
 	mux.Handle("GET /api/reports/usage", protected(anyAdmin, h.GetUsageReport))
 	mux.Handle("GET /api/session/ice", protected(anyAdmin, h.ICEServers))
 
+	// Invite links are open to both roles: an Admin's link is pinned to them by the
+	// handler and may only target a team they belong to, so it can grant no access they
+	// do not already have. Listing and revoking are scoped the same way — an Admin sees
+	// and kills their own links, a Super Admin the org's.
+	mux.Handle("POST /api/devices/enrollment-token", protected(anyAdmin, h.GenerateEnrollmentToken))
+	mux.Handle("GET /api/devices/enrollment-tokens", protected(anyAdmin, h.ListEnrollmentTokens))
+	mux.Handle("DELETE /api/devices/enrollment-token/", protected(anyAdmin, h.RevokeEnrollmentToken))
+
 	// Super Admin only (SRS FR-1.5, FR-1.6).
-	mux.Handle("POST /api/devices/enrollment-token", protected(superAdminOnly, h.GenerateEnrollmentToken))
 	mux.Handle("PUT /api/devices/", protected(superAdminOnly, h.AssignDevice))
 	mux.Handle("DELETE /api/devices/", protected(superAdminOnly, h.DeleteDevice))
 	mux.Handle("POST /api/groups", protected(superAdminOnly, h.CreateGroup))

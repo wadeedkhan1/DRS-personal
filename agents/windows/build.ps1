@@ -10,12 +10,20 @@
 [CmdletBinding()]
 param(
     [string]$MingwBin = 'C:\msys64\mingw64\bin',
-    [string]$OutDir   = (Join-Path $PSScriptRoot 'build'),
+    # Defaulted in the body, not here: $PSScriptRoot is EMPTY while a param block's
+    # defaults are evaluated under `powershell -File script.ps1`, though it is populated
+    # everywhere else (`& .\script.ps1`, `powershell -Command`, and the script body). A
+    # `Join-Path $PSScriptRoot` default therefore fails with "Cannot bind argument to
+    # parameter 'Path' because it is an empty string" for exactly the invocation the
+    # README recommends, and works when you test it from an open session.
+    [string]$OutDir,
     [string]$Name     = 'drs-agent.exe'
 )
 
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
+
+if (-not $OutDir) { $OutDir = Join-Path $PSScriptRoot 'build' }
 
 if (-not (Test-Path (Join-Path $MingwBin 'gcc.exe'))) {
     throw "gcc not found in $MingwBin. Install MSYS2 and the mingw-w64 toolchain, or pass -MingwBin."

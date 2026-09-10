@@ -92,7 +92,136 @@ These are the specific bugs this rework fixed, and each is easy to verify:
 | `SELECT * FROM sessions` after a session ends | `ended_at` set, `status = 'completed'`. |
 | `UPDATE audit_logs SET action='x';` in psql | Rejected: `audit_logs is append-only`. |
 
-## 6. Deployment
+## 5b. Zero-touch enrollment
+
+The flow this exists for: **one link, ten machines, nothing typed.**
+
+First stage a binary where the backend can read it. In `backend\.env`:
+
+```
+AGENT_BINARY_DIR=../deploy/downloads
+```
+
+then copy `agents\windows\build\drs-agent.exe` into `deploy\downloads\` and restart the
+backend. Without this the enroll page says no agent is published — which is the correct
+behaviour, not a failure.
+
+1. Log in as an **Admin** (not the super admin) who is on a team. **Invite devices** →
+   the "Assign to Admin" picker should be **absent** (their link is pinned to them
+   server-side), and the team list should show only their teams. Name the link and create it.
+2. Open the invite link **on a second machine**. Download the Windows agent. The file must
+   be named `drs-agent.exe` and be a few hundred bytes larger than the one in
+   `deploy\downloads\` — that difference is the config trailer.
+3. **Double-click it. Type nothing.** Within a few seconds it should appear in the portal,
+   in that admin's team, under its own computer name. Check:
+   - `%AppData%\drs\agent.log` — "self-enrolling against …" then "self-enrolled as device …"
+   - `reg query HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v DRSAgent`
+4. **Run it again.** It must *not* re-enroll: no new log line, no new device, and the
+   existing device stays online. Re-enrolling would rotate the secret on every launch.
+5. **Rename it to `foo.exe`** and run it on a clean machine — still self-enrolls. This is
+   what the trailer buys over encoding the config in the filename.
+6. Use the **same link** on a third machine. Two devices, one team, separate secrets.
+
+**Machine-id de-duplication** (the fleet-rollout failure this prevents):
+
+| What to do | What should happen |
+|---|---|
+| Enroll two machines with the **same hostname** (rename one, or clone a VM) | **Two** devices, both online. Before this they collided: the second took the first's row and the first was authenticated out of its own identity, reconnecting forever with a dead secret. |
+| Upgrade an agent that enrolled **before** this change, and let it re-enroll | It adopts its existing device row and fills in `machine_id` — it must **not** create a duplicate and leave the original offline. |
+| Delete `%AppData%\drs\machine-id` and re-enroll | A new device appears. Expected: wiping it makes the machine look new, the same way losing the identity file does. |
+
+**Revocation** — the counterweight to a self-enrolling installer:
+
+1. **Invite Links** in the sidebar. The link should be listed with its team and a device count.
+2. **Revoke** it.
+3. Try the download link again → **404**, not a binary.
+4. Run an installer downloaded from it *before* revoking → enrollment refused.
+5. The devices it already enrolled must **keep streaming**. Revocation stops new
+   enrollments; it does not un-enroll anything.
+
+**Access control worth checking deliberately:**
+
+| What to do | What should happen |
+|---|---|
+| As an Admin, `POST /api/devices/enrollment-token` naming a team they are **not** on | 403. Without this check, opening the route to Admins would be an escalation. |
+| As Admin A, open **Invite Links** | Only A's links. Admin B's are invisible, and `DELETE`ing one of B's by id returns 404. |
+| `GET /api/enroll/agent?token=DRS-BOGUS` | 404, not a generic binary. |
+| Unset `AGENT_BINARY_DIR` and reload `/enroll?token=…` | Says no agent is published, rather than offering a download that 404s. |
+
+**Android:** open the invite link **on the phone**, install the APK, then tap
+**Set up the agent**. It should enroll with nothing typed and land in the same team.
+Tapping it again on an already-enrolled phone must do nothing — the log says
+"ignoring an enroll link: this device is already enrolled".
+
+Both new devices should then show up together on the wall at `/teams/{id}/monitor`.
+
+## 6. The monitoring wall
+
+Needs **at least two** enrolled devices to be worth anything; the interesting behaviour is
+what happens between tiles. Two Windows agents on one machine work fine — enroll them under
+different names, since devices de-dup on `(org, name, type)`.
+
+1. Put both devices in a team (**Teams → a team → Add device**), then open
+   **Teams → Monitor all**, or the sidebar's **Monitoring Wall** for everything you can see.
+2. Both tiles should go live. Check the agent log (`%AppData%\drs\agent.log`) for
+   `fps=4` / `maxWidth=480` in the `start_session` — that is the per-session quality
+   request, and it is the whole reason a dozen tiles is affordable.
+3. **Click a tile.** It should enlarge, and its `start_session` in the log should now read
+   `fps=24 maxWidth=1280`. Expect a ~1s black frame: enlarging re-opens the session rather
+   than renegotiating it. The other tile must keep streaming throughout.
+4. **Click Close (or press Esc).** It drops back into the grid at tile quality.
+5. The enlarge/collapse cycle must **never** show "already being viewed by someone else".
+   If it does, the per-device handoff gate in `useDeviceSession` is not doing its job — the
+   old session's socket had not finished closing before the new one claimed the device.
+6. Leave the wall open and, in a second browser, open `/devices/{id}/live` for one of those
+   devices. It must be refused as busy, and the wall must be undisturbed. One viewer per
+   device still holds; the wall just holds several devices at once.
+7. Close the wall tab. Both devices should return to `online` within a second.
+
+**Access control.** Log in as an Admin who is *not* on that team:
+
+| What to do | What should happen |
+|---|---|
+| Open `/monitor` | None of that team's devices appear |
+| Paste `/teams/{id}/monitor` directly | "Team not found" card — the same answer whether it does not exist or they are simply not on it |
+| Add them to the team, reload | The devices appear and the wall works |
+
+Server-side, nothing new is being trusted: every tile is an ordinary `/ws/session` that
+re-checks `canViewDevice` against live membership. The quick proof is to connect to
+`/ws/session?deviceId=…&fps=999&maxWidth=1` by hand — the agent should be asked for
+`fps=60 maxWidth=320`, i.e. clamped, not obeyed.
+
+## 7. The Android agent in the background
+
+This is the one that needs a real phone; an emulator will not tell you much about how the
+OS treats a dismissed app.
+
+```bash
+cd agents/android && npm install && npm run android
+```
+
+Enroll it, confirm **Online** in the portal, then:
+
+| What to do | What should happen |
+|---|---|
+| **Swipe the app out of recents** | Notification stays. Portal keeps showing the device **online for minutes**. This is the regression that defines the feature — before, it disconnected instantly. |
+| Reopen the app | Shows the still-running connection, not a fresh connect. The debug log has no new "connecting" line. |
+| Tap **Disconnect** in the notification | Notification clears, portal shows offline **within a second** (not after 30s of missed heartbeats). |
+| Reopen the app after disconnecting | Shows "Disconnected" with a **Connect** button, and the enrolled identity intact — Disconnect is not Reset. |
+| Tap Connect | Back online. |
+| Force-stop the app from Settings, then reopen it | Reconnects on its own, because the enabled flag persisted. |
+| Disconnect, then force-stop and reopen | Stays disconnected. A deliberate Disconnect must not be undone by a restart. |
+| Start a session from the portal while the app is on screen | Consent dialog appears as before; video flows. |
+| **Start a session with the app swiped away** | A heads-up notification: "<operator> wants to view this device." Tapping it opens the app, *then* the consent dialog appears. Approving delivers video. |
+| Ignore that notification for 60s | The browser shows a real error ("not approved on the device in time"), not a black screen. |
+| While a session is live, pull down the shade | The ongoing notification reads "Live — sharing screen" and names the operator. |
+
+Two things that are **not** implemented, so do not test for them: the agent does not start
+after a reboot (open the app once), and nothing asks the phone to exempt DRS from battery
+optimisation — on Xiaomi/Samsung/Oppo the OS may still kill it after a long idle spell.
+Both are listed in `DRS docs/AGENT_ANDROID.md`.
+
+## 8. Deployment
 
 ```bash
 cd deploy
@@ -195,6 +324,5 @@ allocation against a real relay with it, and confirms an expired credential is r
 
 ## Not implemented
 
-- **Android agent.** Still the original stub: it has no capture pipeline and no socket.
-  The enrollment modal now says so instead of showing a fake QR code.
 - Remote control (mouse/keyboard), MFA, MSI installer, session recording, multi-viewer.
+- Android boot autostart and battery-optimisation exemption (see §7).

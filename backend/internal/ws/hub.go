@@ -56,6 +56,19 @@ const (
 	// where it holds a smooth rate on ordinary hardware.
 	defaultSessionFPS      = 24
 	defaultSessionMaxWidth = 1280
+
+	// Bounds for the per-session quality a viewer may ask for on /ws/session. The
+	// monitoring wall opens many sessions at once and wants each tile cheap, so the
+	// request is per-session rather than server-global — but the client picks the number,
+	// so it is clamped here before it reaches an agent.
+	//
+	// These match the Windows agent's own clamps (agents/windows/internal/screen/webrtc.go)
+	// deliberately: two clamps that disagree would mean the operator is shown one figure
+	// and the device encodes at another.
+	minSessionFPS      = 1
+	maxSessionFPS      = 60
+	minSessionMaxWidth = 320
+	maxSessionMaxWidth = 3840
 )
 
 // agentUpgrader accepts the device's socket. Origin checking is deliberately skipped:

@@ -1,7 +1,7 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { Monitor, Users, FolderKanban, History, BarChart3, Tv, Clock } from 'lucide-react';
+import { Monitor, Users, FolderKanban, History, BarChart3, Tv, Clock, LayoutGrid, Link2 } from 'lucide-react';
 
 export const Sidebar: React.FC = () => {
   const { isSuperAdmin } = useAuth();
@@ -11,7 +11,11 @@ export const Sidebar: React.FC = () => {
   const navItems = [
     { to: '/devices', label: 'Endpoints / Devices', icon: Monitor },
     { to: '/viewer', label: 'Live Screen Viewer', icon: Tv },
+    { to: '/monitor', label: 'Monitoring Wall', icon: LayoutGrid },
     { to: '/teams', label: 'Teams & Groups', icon: FolderKanban },
+    // Both roles: the list is scoped to links the caller created, and an Admin can now
+    // mint their own.
+    { to: '/invites', label: 'Invite Links', icon: Link2 },
     ...(isSuperAdmin ? [{ to: '/users', label: 'Admin Accounts', icon: Users }] : []),
     { to: '/sessions', label: 'Session History', icon: Clock },
     { to: '/audit', label: 'Audit Trail', icon: History },

@@ -66,8 +66,20 @@ services:
       TURN_PORT: ${TURN_PORT:-3478}
       TURN_REALM: ${TURN_REALM:-drs}
       FORCE_TURN_RELAY: ${FORCE_TURN_RELAY:-false}
+      # Where the agent binaries live, so the backend can serve one with this invite's
+      # server address and token baked into it. The same directory nginx publishes at
+      # /downloads/ for the plain, unconfigured binaries.
+      AGENT_BINARY_DIR: /srv/downloads
+      # Only needed when the address derived from the request is wrong — behind a proxy
+      # that does not forward Host or X-Forwarded-Host. It is written into downloaded
+      # agents, so a wrong value produces agents that can never connect.
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       DEFAULT_SUPERADMIN_EMAIL: ${ADMIN_EMAIL:-admin@drs.local}
       DEFAULT_SUPERADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required for the first login}
+    volumes:
+      # Read-only, and the same bind mount nginx gets: the backend reads these to
+      # personalise a download, and must never be able to modify them.
+      - ./downloads:/srv/downloads:ro
     depends_on:
       postgres:
         condition: service_healthy

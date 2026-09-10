@@ -46,6 +46,34 @@ export interface DeviceGroup {
   member_count: number;
 }
 
+/** The response to minting an invite link. The token is shown once and never re-fetched. */
+export interface EnrollmentTokenCreated {
+  id: string;
+  enrollment_token: string;
+  expires_at: string;
+}
+
+/**
+ * One outstanding invite link.
+ *
+ * Carries no token: the plaintext exists only in the response that created it, and only
+ * the hash is stored. A link is identified for revocation by its id.
+ */
+export interface EnrollmentTokenSummary {
+  id: string;
+  label: string;
+  device_type: DeviceType;
+  group_id: string | null;
+  group_name: string;
+  created_by: string | null;
+  created_by_email: string;
+  created_at: string;
+  revoked_at: string | null;
+  expires_at: string;
+  /** How many devices this link has enrolled — what decides if revoking it is safe. */
+  device_count: number;
+}
+
 /** One admin on a team. */
 export interface GroupMember {
   user_id: string;

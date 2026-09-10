@@ -11,6 +11,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -112,11 +113,87 @@ func runAgent() {
 	}
 	defer release()
 
+	// A binary handed out through an invite link carries its own configuration, so it can
+	// enroll before showing anything. Failures here are not fatal: they fall through to
+	// the manual GUI, which is pre-filled from the same configuration.
+	//
+	// A zero-touch binary that is ready goes **straight to the tray**: there is nothing to
+	// tell the user and nothing to ask them, so a window would only be something to close.
+	// Self-enrollment failing is the one case that does need the window — gui.Run always
+	// shows it when the device is not enrolled, so that path needs no special handling
+	// here.
+	silent := selfEnroll()
+
 	// The GUI owns the main goroutine: on Windows the tray's message loop has to run on
 	// the thread the process started on. It handles enrollment (when the device is not yet
 	// enrolled) and the live connection itself, so there is nothing to set up here first.
-	gui.Run(*startup)
+	gui.Run(*startup || silent)
 	log.Println("agent: stopped")
+}
+
+// selfEnroll enrolls this machine from configuration appended to the executable by the
+// download endpoint, so an agent sent through an invite link needs nothing typed.
+//
+// Every exit is silent and non-fatal. This runs before the window appears, and a machine
+// whose enrollment failed should get the ordinary form — pre-filled — rather than an
+// error dialog nobody can act on.
+//
+// It reports whether this is a zero-touch binary that is ready to run, which is what
+// decides between going straight to the tray and opening a window. True means "there is
+// nothing to show the user": either it just enrolled, or it is a configured binary being
+// run again on a machine that is already enrolled. False means either an ordinary
+// hand-configured build, or a self-enrollment that failed and needs the form.
+func selfEnroll() (silent bool) {
+	// Never re-enroll. Enrolling rotates the agent secret, so doing it on every launch of
+	// an already-configured agent would invalidate the identity the previous run was
+	// using and churn the device row on every reboot.
+	//
+	// An already-enrolled machine running a zero-touch binary still starts silently: the
+	// recipient double-clicked an installer, and a window they have to close is not what
+	// they were promised.
+	if existing, err := config.Load(); err == nil && existing.Enrolled() {
+		_, embErr := config.ReadEmbedded()
+		return embErr == nil
+	}
+
+	embedded, err := config.ReadEmbedded()
+	if err != nil {
+		if !errors.Is(err, config.ErrNoEmbedded) {
+			// A damaged trailer is worth a log line: it means the download was truncated,
+			// which is otherwise invisible and looks like the feature simply not working.
+			log.Printf("agent: embedded configuration unusable: %v", err)
+		}
+		return false
+	}
+
+	log.Printf("agent: self-enrolling against %s", embedded.ServerURL)
+	cfg, err := enroll.Enroll(embedded.ServerURL, embedded.Token, "")
+	if err != nil {
+		// Most often the server is unreachable from this machine, or the invite link has
+		// been revoked. Show the window: the GUI says so with the fields already filled in.
+		log.Printf("agent: self-enrollment failed: %v", err)
+		return false
+	}
+	if err := config.Save(cfg); err != nil {
+		log.Printf("agent: could not save the identity from self-enrollment: %v", err)
+		return false
+	}
+	log.Printf("agent: self-enrolled as device %s", cfg.DeviceID)
+
+	if embedded.Autostart {
+		// Registering autostart is what makes "run it once" mean "this machine is
+		// managed" rather than "managed until it reboots". Failure is not worth aborting
+		// an otherwise successful enrollment over, and not worth showing a window for.
+		if exe, exeErr := os.Executable(); exeErr != nil {
+			log.Printf("agent: could not determine the executable path for autostart: %v", exeErr)
+		} else if err := installAutostart(exe); err != nil {
+			log.Printf("agent: could not register autostart: %v", err)
+		} else {
+			log.Println("agent: registered to start at login")
+		}
+	}
+
+	return true
 }
 
 // setupLogging sends output to %AppData%\drs\agent.log.

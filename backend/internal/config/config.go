@@ -50,6 +50,22 @@ type Config struct {
 	// using it as a fallback. Requires TURN to be configured.
 	ForceRelay bool
 
+	// AgentBinaryDir is where the agent binaries staged for download live
+	// (drs-agent.exe, drs-agent.apk). Empty disables the personalised-download endpoint
+	// entirely, which is the right default: a deployment that has not staged a binary
+	// should say so rather than serve a 500 or an empty file.
+	//
+	// This is the only filesystem path the backend knows about. nginx keeps serving the
+	// same directory at /downloads/ for the plain, unconfigured binaries.
+	AgentBinaryDir string
+
+	// PublicBaseURL overrides the origin the backend believes it is reachable at, which
+	// is otherwise derived per-request from X-Forwarded-Proto / X-Forwarded-Host / Host.
+	// That derivation is right behind nginx and right in most dev setups; this exists for
+	// the ones where it is not, because the value gets baked into downloaded agents and a
+	// wrong one produces agents that can never connect.
+	PublicBaseURL string
+
 	// Bootstrap super admin, created only when no super admin exists yet.
 	AdminEmail string
 	AdminPass  string
@@ -87,6 +103,9 @@ func LoadConfig() (*Config, error) {
 		TURNRealm:    getEnv("TURN_REALM", "drs"),
 		TURNCredTTL:  time.Duration(getEnvInt("TURN_CRED_TTL_SECONDS", 3600)) * time.Second,
 		ForceRelay:   getEnvBool("FORCE_TURN_RELAY", false),
+
+		AgentBinaryDir: os.Getenv("AGENT_BINARY_DIR"),
+		PublicBaseURL:  strings.TrimRight(os.Getenv("PUBLIC_BASE_URL"), "/"),
 
 		AdminEmail: getEnv("DEFAULT_SUPERADMIN_EMAIL", "admin@drs.local"),
 		AdminPass:  os.Getenv("DEFAULT_SUPERADMIN_PASSWORD"),

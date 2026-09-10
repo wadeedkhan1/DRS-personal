@@ -17,6 +17,7 @@ import {
   ShieldCheck,
   AlertCircle,
   Play,
+  LayoutGrid,
 } from 'lucide-react';
 
 /**
@@ -143,15 +144,26 @@ export const TeamDetailPage: React.FC = () => {
                 Devices <span className="text-slate-500 font-normal">({teamDevices.length})</span>
               </h2>
             </div>
-            {isSuperAdmin && (
-              <button
-                onClick={() => setPickingDevice(true)}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-semibold border border-slate-700/60 transition-colors"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                <span>Add device</span>
-              </button>
-            )}
+            <div className="flex items-center gap-2">
+              {teamDevices.length > 0 && (
+                <Link
+                  to={`/teams/${group.id}/monitor`}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 text-[11px] font-semibold border border-sky-500/30 transition-colors"
+                >
+                  <LayoutGrid className="w-3.5 h-3.5" />
+                  <span>Monitor all</span>
+                </Link>
+              )}
+              {isSuperAdmin && (
+                <button
+                  onClick={() => setPickingDevice(true)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-semibold border border-slate-700/60 transition-colors"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Add device</span>
+                </button>
+              )}
+            </div>
           </header>
 
           {teamDevices.length === 0 ? (

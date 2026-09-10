@@ -1,4 +1,4 @@
-import React, {useCallback, useEffect, useRef, useState} from 'react';
+import React, {useEffect, useRef, useState} from 'react';
 import {
   Alert,
   PermissionsAndroid,
@@ -15,20 +15,18 @@ import {
 } from 'react-native';
 import {clearLogs, getLogText, subscribeLogs} from './src/log';
 
-import {Connection, ConnStatus} from './src/net/connection';
-import {defaultAcquireStream} from './src/webrtc/session';
+import {ConnStatus} from './src/net/connection';
 import {enroll} from './src/net/enroll';
+import {clearIdentity, saveIdentity} from './src/config/storage';
+import {getDeviceTelemetry} from './src/telemetry';
 import {
-  clearIdentity,
-  Identity,
-  loadIdentity,
-  saveIdentity,
-} from './src/config/storage';
-import {
-  getDeviceTelemetry,
-  startConnectionService,
-  stopConnectionService,
-} from './src/telemetry';
+  adoptIdentity,
+  RuntimeState,
+  resetRuntimeIdentity,
+  startRuntime,
+  stopRuntime,
+  subscribeRuntime,
+} from './src/runtime';
 
 const STATUS_LABEL: Record<ConnStatus, string> = {
   connecting: 'Connecting…',
@@ -36,7 +34,7 @@ const STATUS_LABEL: Record<ConnStatus, string> = {
   in_session: 'Live — sharing screen',
   reconnecting: 'Reconnecting…',
   fatal: 'Disconnected',
-  stopped: 'Stopped',
+  stopped: 'Disconnected',
 };
 
 async function ensureNotificationPermission(): Promise<void> {
@@ -52,67 +50,59 @@ async function ensureNotificationPermission(): Promise<void> {
 }
 
 export default function App() {
-  const [identity, setIdentity] = useState<Identity | null>(null);
-  const [loading, setLoading] = useState(true);
   const [serverUrl, setServerUrl] = useState('http://192.168.1.100:8080');
   const [token, setToken] = useState('');
   const [enrolling, setEnrolling] = useState(false);
-  const [status, setStatus] = useState<ConnStatus>('connecting');
-  const [statusMessage, setStatusMessage] = useState<string | undefined>();
   const [battery, setBattery] = useState<number | null>(null);
   const [deviceModel, setDeviceModel] = useState<string>('');
-  const [statLine, setStatLine] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
 
-  const connRef = useRef<Connection | null>(null);
   const logScrollRef = useRef<ScrollView | null>(null);
+
+  // The runtime owns the connection; this screen only watches it. Unsubscribing on
+  // unmount deliberately does not stop anything — that is what makes the agent survive
+  // the app being swiped out of recents.
+  const [rt, setRt] = useState<RuntimeState>(() => ({
+    enabled: false,
+    status: 'stopped',
+    statLine: null,
+    identity: null,
+    loading: true,
+  }));
+  useEffect(() => subscribeRuntime(setRt), []);
+
+  const {identity, loading, status, statLine} = rt;
+  const statusMessage = rt.message;
 
   // Mirror the shared logger into the UI.
   useEffect(() => subscribeLogs(setLogs), []);
 
-  // Restore a saved identity on launch.
   useEffect(() => {
-    (async () => {
-      const id = await loadIdentity();
-      setIdentity(id);
-      setLoading(false);
-    })();
     getDeviceTelemetry().then(t => {
       setBattery(t.batteryLevel);
       setDeviceModel(t.deviceModel);
     });
   }, []);
 
-  const connect = useCallback(async (id: Identity) => {
-    await ensureNotificationPermission();
-    await startConnectionService();
-    const conn = new Connection(id, {
-      acquire: defaultAcquireStream,
-      onStatus: (s, msg) => {
-        setStatus(s);
-        setStatusMessage(msg);
-        if (s !== 'in_session') {
-          setStatLine(null);
-        }
-      },
-      onStat: setStatLine,
-    });
-    connRef.current = conn;
-    conn.start();
-  }, []);
-
-  // Open the connection whenever we have an identity; tear it down on unmount / reset.
-  useEffect(() => {
-    if (!identity) {
-      return;
+  const handleConnect = async () => {
+    setBusy(true);
+    try {
+      await ensureNotificationPermission();
+      await startRuntime();
+    } finally {
+      setBusy(false);
     }
-    connect(identity);
-    return () => {
-      connRef.current?.stop();
-      connRef.current = null;
-      stopConnectionService();
-    };
-  }, [identity, connect]);
+  };
+
+  const handleDisconnect = async () => {
+    setBusy(true);
+    try {
+      await stopRuntime();
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const handleEnroll = async () => {
     if (!serverUrl.trim()) {
@@ -125,10 +115,11 @@ export default function App() {
     }
     setEnrolling(true);
     try {
+      await ensureNotificationPermission();
       const t = await getDeviceTelemetry();
       const id = await enroll(serverUrl, token, t.deviceModel || 'Android Phone');
       await saveIdentity(id);
-      setIdentity(id); // triggers connect
+      await adoptIdentity(id); // triggers connect
     } catch (e: any) {
       Alert.alert('Enrollment failed', e?.message ?? String(e));
     } finally {
@@ -146,12 +137,9 @@ export default function App() {
           text: 'Reset',
           style: 'destructive',
           onPress: async () => {
-            connRef.current?.stop();
-            connRef.current = null;
-            await stopConnectionService();
+            await resetRuntimeIdentity();
             await clearIdentity();
             setToken('');
-            setIdentity(null);
           },
         },
       ],
@@ -166,14 +154,19 @@ export default function App() {
     }
   };
 
-  const dotStyle =
-    status === 'in_session'
-      ? styles.dotGreen
-      : status === 'online'
-      ? styles.dotSky
-      : status === 'fatal'
-      ? styles.dotRed
-      : styles.dotAmber;
+  // A disconnected agent is grey rather than amber: amber reads as "working on it",
+  // which is exactly wrong for a state that will never change on its own.
+  const dotStyle = !rt.enabled
+    ? styles.dotSlate
+    : status === 'in_session'
+    ? styles.dotGreen
+    : status === 'online'
+    ? styles.dotSky
+    : status === 'fatal'
+    ? styles.dotRed
+    : styles.dotAmber;
+
+  const statusLabel = rt.enabled ? STATUS_LABEL[status] : 'Disconnected';
 
   return (
     <SafeAreaView style={styles.container}>
@@ -232,19 +225,19 @@ export default function App() {
           <View style={styles.card}>
             <View style={styles.statusRow}>
               <View style={[styles.dot, dotStyle]} />
-              <Text style={styles.statusText}>{STATUS_LABEL[status]}</Text>
+              <Text style={styles.statusText}>{statusLabel}</Text>
             </View>
 
-            {status === 'in_session' && (
+            {rt.enabled && status === 'in_session' && (
               <Text style={styles.sessionHint}>
                 {statusMessage ? `${statusMessage} is viewing. ` : ''}
                 Approve the screen-capture prompt if it appears.
               </Text>
             )}
-            {status === 'in_session' && statLine && (
+            {rt.enabled && status === 'in_session' && statLine && (
               <Text style={styles.statLine}>{statLine}</Text>
             )}
-            {status === 'fatal' && statusMessage ? (
+            {rt.enabled && status === 'fatal' && statusMessage ? (
               <Text style={styles.errorHint}>{statusMessage}</Text>
             ) : null}
 
@@ -258,9 +251,28 @@ export default function App() {
             </View>
 
             <Text style={styles.note}>
-              Capture is started remotely by an operator. Keep the app running; a
-              notification keeps the connection alive in the background.
+              {rt.enabled
+                ? 'The agent keeps running in the background — closing this app or ' +
+                  'removing it from recents will not disconnect it. Use Disconnect ' +
+                  'here or in the notification to stop it. If an operator asks to view ' +
+                  'your screen while the app is closed, a notification will ask you to ' +
+                  'approve it.'
+                : 'The agent is disconnected and no one can view this device. Connect ' +
+                  'to make it available for monitoring again.'}
             </Text>
+
+            <TouchableOpacity
+              style={[
+                styles.primaryButton,
+                rt.enabled && styles.disconnectButton,
+                busy && styles.buttonDisabled,
+              ]}
+              onPress={rt.enabled ? handleDisconnect : handleConnect}
+              disabled={busy}>
+              <Text style={styles.buttonText}>
+                {busy ? 'Working…' : rt.enabled ? 'Disconnect' : 'Connect'}
+              </Text>
+            </TouchableOpacity>
 
             <TouchableOpacity
               style={[styles.primaryButton, styles.resetButton]}
@@ -347,6 +359,7 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   resetButton: {backgroundColor: '#334155'},
+  disconnectButton: {backgroundColor: '#9f1239'},
   buttonDisabled: {opacity: 0.6},
   buttonText: {color: '#ffffff', fontWeight: '600', fontSize: 14},
   statusRow: {flexDirection: 'row', alignItems: 'center', marginBottom: 12},
@@ -355,6 +368,7 @@ const styles = StyleSheet.create({
   dotSky: {backgroundColor: '#38bdf8'},
   dotAmber: {backgroundColor: '#f59e0b'},
   dotRed: {backgroundColor: '#ef4444'},
+  dotSlate: {backgroundColor: '#64748b'},
   statusText: {fontSize: 15, fontWeight: '600', color: '#f8fafc', flexShrink: 1},
   sessionHint: {fontSize: 12, color: '#22c55e', marginBottom: 12},
   statLine: {fontSize: 11, color: '#38bdf8', fontFamily: 'monospace', marginBottom: 12},

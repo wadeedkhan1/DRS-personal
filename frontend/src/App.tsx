@@ -7,6 +7,8 @@ import { LiveViewerPage } from './pages/LiveViewerPage';
 import { LiveSessionPage } from './pages/LiveSessionPage';
 import { TeamsPage } from './pages/TeamsPage';
 import { TeamDetailPage } from './pages/TeamDetailPage';
+import { GroupMonitorPage } from './pages/GroupMonitorPage';
+import { InviteLinksPage } from './pages/InviteLinksPage';
 import { UsersPage } from './pages/UsersPage';
 import { SessionsPage } from './pages/SessionsPage';
 import { AuditLogsPage } from './pages/AuditLogsPage';
@@ -36,8 +38,16 @@ export const MainApp: React.FC = () => (
         {/* Deep-linkable session. Pasting or refreshing this resolves the device by id. */}
         <Route path="devices/:deviceId/live" element={<LiveSessionPage />} />
         <Route path="viewer" element={<LiveViewerPage />} />
+        {/* The monitoring wall. Both forms use the same page: unscoped shows every
+            device the operator may see, scoped narrows it to one team. Neither needs a
+            role guard beyond RequireAuth — the device list and each tile's session are
+            already scoped server-side. */}
+        <Route path="monitor" element={<GroupMonitorPage />} />
+        {/* Both roles: the list is scoped server-side to links the caller created. */}
+        <Route path="invites" element={<InviteLinksPage />} />
         <Route path="teams" element={<TeamsPage />} />
         <Route path="teams/:groupId" element={<TeamDetailPage />} />
+        <Route path="teams/:groupId/monitor" element={<GroupMonitorPage />} />
         <Route path="sessions" element={<SessionsPage />} />
         <Route path="audit" element={<AuditLogsPage />} />
         <Route path="reports" element={<ReportsPage />} />

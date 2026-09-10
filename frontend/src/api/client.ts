@@ -1,4 +1,7 @@
-import { Device, DeviceGroup, GroupMember, Session, AuditLog, UsageReport, User } from '../types';
+import {
+  Device, DeviceGroup, GroupMember, Session, AuditLog, UsageReport, User,
+  EnrollmentTokenCreated, EnrollmentTokenSummary,
+} from '../types';
 import { ICEServerConfig } from './protocol';
 
 const API_BASE = '/api';
@@ -37,6 +40,36 @@ export class ApiClient {
     return response.json();
   }
 
+  /**
+   * A request with no response body.
+   *
+   * `request` always calls `response.json()`, which throws on a 204 — so an endpoint that
+   * correctly returns "no content" looked like a failure to the caller. The mutations
+   * typed `Promise<void>` above predate this and mostly get away with it because their
+   * handlers happen to return a JSON body; anything that genuinely 204s must use this.
+   */
+  private static async requestVoid(endpoint: string, options: RequestInit = {}): Promise<void> {
+    const token = this.getToken();
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...(options.headers as Record<string, string>),
+    };
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+
+    const response = await fetch(`${API_BASE}${endpoint}`, { ...options, headers });
+    if (!response.ok) {
+      if (response.status === 401) {
+        localStorage.removeItem('drs_token');
+        localStorage.removeItem('drs_user');
+        window.location.href = '/login';
+      }
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`);
+    }
+  }
+
   // Auth
   static async login(email: string, password: string): Promise<{ token: string; user: User }> {
     const res = await this.request<{ token: string; user: User }>('/auth/login', {
@@ -65,11 +98,41 @@ export class ApiClient {
     deviceType: string,
     assignedAdminId?: string,
     groupId?: string,
-  ): Promise<{ enrollment_token: string; expires_at: string }> {
-    return this.request<{ enrollment_token: string; expires_at: string }>('/devices/enrollment-token', {
+    label?: string,
+  ): Promise<EnrollmentTokenCreated> {
+    return this.request<EnrollmentTokenCreated>('/devices/enrollment-token', {
       method: 'POST',
-      body: JSON.stringify({ device_type: deviceType, assigned_admin_id: assignedAdminId, group_id: groupId }),
+      body: JSON.stringify({
+        device_type: deviceType,
+        assigned_admin_id: assignedAdminId,
+        group_id: groupId,
+        label,
+      }),
     });
+  }
+
+  /**
+   * Outstanding invite links. Scoped server-side: an Admin sees only their own.
+   *
+   * Worth having a list at all because a link is now a downloadable, self-enrolling
+   * installer rather than a code somebody types — so knowing what is outstanding, and
+   * being able to kill it, is part of the feature rather than an extra.
+   */
+  static async listEnrollmentTokens(): Promise<EnrollmentTokenSummary[]> {
+    return this.request<EnrollmentTokenSummary[]>('/devices/enrollment-tokens');
+  }
+
+  /**
+   * Stops a link enrolling anything new. Devices it already enrolled keep working —
+   * they hold their own secrets, and removing them is a separate, deliberate act.
+   */
+  static async revokeEnrollmentToken(id: string): Promise<void> {
+    await this.requestVoid(`/devices/enrollment-token/${id}`, { method: 'DELETE' });
+  }
+
+  /** Which agent binaries this deployment can hand out. */
+  static async agentAvailability(): Promise<{ windows: boolean; android: boolean }> {
+    return this.request<{ windows: boolean; android: boolean }>('/enroll/availability');
   }
 
   /**

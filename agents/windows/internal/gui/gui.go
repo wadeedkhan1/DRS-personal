@@ -109,6 +109,17 @@ func (u *gui) showEnroll() {
 	tokenEntry := widget.NewEntry()
 	tokenEntry.SetPlaceHolder("Enrollment token (DRS-…)")
 
+	// This form is only reached when self-enrollment did not happen. If the binary came
+	// from an invite link, the details are already known and the failure was something
+	// transient — an unreachable server, a revoked link — so fill them in and leave the
+	// user one click from retrying rather than hunting for the link again.
+	if embedded, err := config.ReadEmbedded(); err == nil {
+		linkEntry.SetText(embedded.ServerURL)
+		tokenEntry.SetText(embedded.Token)
+		intro.SetText("This agent is preconfigured but could not reach the server. " +
+			"Check the address below and try again.")
+	}
+
 	// Pasting a full invite link fills the token in automatically and leaves just the
 	// server address behind, so the two fields never fight over the same text.
 	linkEntry.OnChanged = func(s string) {

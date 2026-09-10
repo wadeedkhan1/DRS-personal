@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -97,6 +98,31 @@ func (h *Hub) authenticateBrowser(w http.ResponseWriter, r *http.Request) (*auth
 	return claims, true
 }
 
+// clampQuery reads an optional positive integer query parameter and clamps it into
+// [min, max], falling back to def when it is absent, unparseable or non-positive.
+//
+// Absent means "use the deployment default", so every caller that predates the monitoring
+// wall keeps behaving exactly as before. Out-of-range is clamped rather than rejected: a
+// tile asking for 1px wide is a client bug, not an attack, and failing the whole session
+// over it would be worse than quietly giving it the smallest sane size.
+func clampQuery(r *http.Request, name string, min, max, def int) int {
+	raw := r.URL.Query().Get(name)
+	if raw == "" {
+		return def
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v <= 0 {
+		return def
+	}
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
+	return v
+}
+
 // canViewDevice is the RBAC rule from SRS FR-1.3, FR-1.4 and FR-6.4: a Super Admin sees
 // every device; an Admin sees a device assigned to them, or one that sits in a team they
 // belong to.
@@ -157,6 +183,12 @@ func (h *Hub) ServeSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "device is offline", http.StatusConflict)
 		return
 	}
+
+	// The viewer may ask this session to be cheaper than the deployment default. The
+	// monitoring wall runs a dozen tiles at once and asks each for a few frames a second
+	// at thumbnail width; the single-device viewer asks for nothing and gets the default.
+	fps := clampQuery(r, "fps", minSessionFPS, maxSessionFPS, h.sessionFPS)
+	maxWidth := clampQuery(r, "maxWidth", minSessionMaxWidth, maxSessionMaxWidth, h.sessionMaxWidth)
 
 	upgrader := h.browserUpgrader()
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -227,8 +259,8 @@ func (h *Hub) ServeSession(w http.ResponseWriter, r *http.Request) {
 		start, err := protocol.Encode(protocol.TypeStartSession, protocol.StartSession{
 			SessionID:          sessionID,
 			Mode:               protocol.ModeWebRTC,
-			FPS:                h.sessionFPS,
-			MaxWidth:           h.sessionMaxWidth,
+			FPS:                fps,
+			MaxWidth:           maxWidth,
 			ICEServers:         h.ice.Servers(),
 			ICETransportPolicy: h.ice.TransportPolicy(),
 			Operator:           claims.Email,

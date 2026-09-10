@@ -35,6 +35,18 @@ export interface SessionHandlers {
   onCapabilities?: (caps: SessionCapabilitiesPayload) => void;
 }
 
+/**
+ * How expensive this session should be for the device to produce.
+ *
+ * Omitted entirely, the server uses its configured defaults (24fps / 1280px). The
+ * monitoring wall asks for far less per tile, because a dozen full-rate streams costs a
+ * dozen devices' encoders and the operator's decoder. Both fields are clamped server-side.
+ */
+export interface SessionQuality {
+  fps?: number;
+  maxWidth?: number;
+}
+
 export type SessionState =
   | 'connecting'   // opening the signaling socket
   | 'negotiating'  // exchanging SDP and ICE
@@ -77,6 +89,7 @@ export class SessionConnection {
     private readonly deviceId: string,
     private readonly token: string,
     private readonly handlers: SessionHandlers,
+    private readonly quality: SessionQuality = {},
   ) {}
 
   async start(): Promise<void> {
@@ -95,7 +108,13 @@ export class SessionConnection {
     }
     if (this.closed) return;
 
-    const url = wsURL('/ws/session', { deviceId: this.deviceId });
+    // fps/maxWidth are only sent when asked for, so the single-device viewer keeps
+    // producing exactly the request it always did.
+    const params: Record<string, string> = { deviceId: this.deviceId };
+    if (this.quality.fps) params.fps = String(this.quality.fps);
+    if (this.quality.maxWidth) params.maxWidth = String(this.quality.maxWidth);
+
+    const url = wsURL('/ws/session', params);
     const ws = new WebSocket(url, bearerSubprotocols(this.token));
     this.ws = ws;
 
@@ -397,8 +416,15 @@ export class SessionConnection {
    * Closing the socket is the whole teardown: the backend responds by telling the agent
    * to stop capturing, so the device is immediately available again. Nothing depends on
    * this method being reached — a crashed tab has the same effect.
+   *
+   * The returned promise resolves once the socket has actually closed, which matters when
+   * something means to reopen a session on the *same* device straight away — the
+   * monitoring wall enlarging a tile, say. The server releases the device's single viewer
+   * slot when it sees the close, so reopening before then is refused as "already being
+   * viewed" by the session that is on its way out. Callers that are simply going away can
+   * ignore it.
    */
-  close() {
+  close(): Promise<void> {
     this.closed = true;
     if (this.statsTimer !== null) {
       window.clearInterval(this.statsTimer);
@@ -407,7 +433,27 @@ export class SessionConnection {
     this.pc?.getReceivers().forEach((r) => r.track?.stop());
     this.pc?.close();
     this.pc = null;
-    this.ws?.close();
+
+    const ws = this.ws;
     this.ws = null;
+    if (!ws || ws.readyState === WebSocket.CLOSED) return Promise.resolve();
+
+    return new Promise<void>((resolve) => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      ws.addEventListener('close', done, { once: true });
+      // A socket that never acknowledges the close must not block the next session
+      // forever; the server drops it on its own read deadline regardless.
+      window.setTimeout(done, 3000);
+      try {
+        ws.close();
+      } catch {
+        done();
+      }
+    });
   }
 }

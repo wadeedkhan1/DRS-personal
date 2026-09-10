@@ -30,16 +30,46 @@
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
         </intent-filter>
+
+        <!-- Zero-touch enrollment. The invite page hands the phone a
+             drs://enroll?server=…&token=… link, which is how the APK gets configured:
+             unlike the Windows agent, an installed APK cannot carry a config blob,
+             because the system renames it to base.apk and an app cannot read its own
+             installer.
+
+             A private scheme rather than an https App Link, because App Links need a
+             verified domain with a hosted assetlinks.json, and this deployment is
+             routinely an IP address on a LAN. launchMode is already singleTask, so a
+             link arriving while the app runs is delivered as a new intent rather than
+             stacking a second activity. -->
+        <intent-filter>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.DEFAULT" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="drs" android:host="enroll" />
+        </intent-filter>
       </activity>
 
       <!-- Keeps the process (and its WebSocket control channel) alive while the app is
-           backgrounded or the screen is off. Not the capture service — that one is
-           provided by react-native-webrtc. -->
+           backgrounded, the screen is off, or the task has been swiped out of recents.
+           Not the capture service — that one is provided by react-native-webrtc.
+
+           stopWithTask="false" is the whole point: without it Android tears the service
+           down with the task, so dismissing the app from recents would disconnect the
+           agent. Disconnecting is the notification's job, not the recents screen's. -->
       <service
         android:name=".ConnectionService"
         android:enabled="true"
         android:exported="false"
+        android:stopWithTask="false"
         android:foregroundServiceType="dataSync" />
+
+      <!-- Receives the notification actions (Disconnect, Approve capture) and hands them
+           to the JS runtime. Not exported: only our own PendingIntents may fire it. -->
+      <receiver
+        android:name=".AgentCommandReceiver"
+        android:enabled="true"
+        android:exported="false" />
 
     </application>
 </manifest>

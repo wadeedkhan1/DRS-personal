@@ -234,6 +234,7 @@ cat > .env <<EOF
 DB_PASSWORD=$(openssl rand -hex 32)
 JWT_SECRET=$(openssl rand -hex 32)
 CORS_ORIGINS=https://${DRS_HOST}
+PUBLIC_BASE_URL=https://${DRS_HOST}
 ADMIN_EMAIL=admin@drs.local
 ADMIN_PASSWORD=$(openssl rand -base64 24 | tr -d '=+/')
 
@@ -264,6 +265,7 @@ The values that matter, and why:
 | Variable | Why it is what it is |
 |---|---|
 | `CORS_ORIGINS` | Exact-match allowlist, not a wildcard: combined with credentials, a reflected origin would give every site on the internet authenticated API access. It must equal the origin you actually type, which is why it is generated from the same `DRS_HOST` as the certificate. |
+| `PUBLIC_BASE_URL` | The origin baked into a zero-touch agent's downloaded `.exe` as its server address. Left unset, the backend derives it from request headers, which is right behind nginx but trusts `X-Forwarded-Host`; pinning it to the same `DRS_HOST` makes the baked URL deterministic and closes that trust. A wrong value produces agents that can never connect, so it is generated from `DRS_HOST` like the rest. |
 | `JWT_SECRET` | `openssl rand -hex 32` gives 64 characters; the floor is 32, below which HMAC-SHA256 carries less than 256 bits. The server refuses to start otherwise. |
 | `TURN_PUBLIC_IP` | Must be a literal address, not a hostname — it is what the relay puts in the candidates it hands out. |
 | `FORCE_TURN_RELAY=false` | STUN attempts a direct path first and the relay stays a fallback. Forcing relay costs ~7–8 Mbps of VPS bandwidth per concurrent session for no gain when a direct path exists. Set it `true` only if direct connections prove unreliable in practice. |

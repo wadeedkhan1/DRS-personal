@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { ApiClient } from '../api/client';
-import { User, DeviceGroup } from '../types';
-import { X, Copy, Check, Monitor, Smartphone, Download, AlertCircle } from 'lucide-react';
+import { User } from '../types';
+import { useAuth } from '../context/AuthContext';
+import { useDevices } from '../context/DeviceContext';
+import { X, Copy, Check, Monitor, Smartphone, Download, AlertCircle, Users } from 'lucide-react';
 import { useAgentDownload } from '../hooks/useAgentDownload';
 
 interface EnrollModalProps {
@@ -11,61 +13,87 @@ interface EnrollModalProps {
 }
 
 export const EnrollDeviceModal: React.FC<EnrollModalProps> = ({ isOpen, onClose, onEnrolled }) => {
+  const { isSuperAdmin, user } = useAuth();
+  // The context already holds an RBAC-scoped team list and is mounted above this modal,
+  // so there is no reason for a second fetch. For an Admin it contains only their teams,
+  // which is exactly what the server will accept.
+  const { groups } = useDevices();
+
   const [deviceType, setDeviceType] = useState<'windows' | 'android'>('windows');
   const [assignedAdminId, setAssignedAdminId] = useState<string>('');
   const [groupId, setGroupId] = useState<string>('');
+  const [label, setLabel] = useState<string>('');
   const [admins, setAdmins] = useState<User[]>([]);
-  const [groups, setGroups] = useState<DeviceGroup[]>([]);
   const [token, setToken] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  // Keyed by what was copied, not a single boolean: one flag made copying any button
+  // tick every button, which reads as "I copied the wrong thing".
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  // Whether this deployment publishes the agent at /downloads/. It decides whether the
-  // invite link is self-contained or the admin still has to send the binary separately,
-  // which is the difference between a one-step and a two-step handover — so say which,
-  // rather than leaving the admin to find out from the recipient.
-  const windowsAgent = useAgentDownload('windows');
-  const androidAgent = useAgentDownload('android');
-  const agent = deviceType === 'windows' ? windowsAgent : androidAgent;
+  // Whether this deployment has an agent staged. It decides whether the invite link is
+  // self-contained or the admin still has to send the binary separately, which is the
+  // difference between a one-step and a two-step handover — so say which, rather than
+  // leaving the admin to find out from the recipient.
+  const windowsAgent = useAgentDownload('windows', token ?? undefined);
+  const androidAgent = useAgentDownload('android', token ?? undefined);
 
   useEffect(() => {
-    if (isOpen) {
-      setToken(null);
-      setCopied(false);
-      ApiClient.listUsers().then(users => setAdmins(users.filter(u => u.role === 'admin'))).catch(() => {});
-      ApiClient.listGroups().then(setGroups).catch(() => {});
+    if (!isOpen) return;
+    setToken(null);
+    setCopiedKey(null);
+    setError(null);
+    // /api/users is Super Admin only — asking as an Admin would 403 and leave a
+    // mysteriously empty dropdown, so only the picker's actual audience fetches it.
+    if (isSuperAdmin) {
+      ApiClient.listUsers()
+        .then((users) => setAdmins(users.filter((u) => u.role === 'admin')))
+        .catch(() => {});
     }
-  }, [isOpen]);
+  }, [isOpen, isSuperAdmin]);
 
   if (!isOpen) return null;
 
   const handleGenerate = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
+    setError(null);
     try {
       const res = await ApiClient.generateEnrollmentToken(
         deviceType,
         assignedAdminId || undefined,
-        groupId || undefined
+        groupId || undefined,
+        label.trim() || undefined,
       );
       setToken(res.enrollment_token);
       onEnrolled();
     } catch (err: any) {
-      alert('Failed to generate token: ' + err.message);
+      setError(err?.message ?? 'Failed to generate the invite link.');
     } finally {
       setLoading(false);
     }
   };
 
-  // The invite link the agent GUI understands: the server origin carries the address to
-  // enroll against, and the token rides as a query parameter. The GUI parses both out.
+  // The link the recipient opens. It carries the token; the download behind it carries
+  // the server address too, baked into the binary.
   const inviteLink = token ? `${window.location.origin}/enroll?token=${token}` : '';
+  const selectedGroup = groups.find((g) => g.id === groupId);
 
-  const copyToClipboard = (text: string) => {
+  const copyToClipboard = (key: string, text: string) => {
     navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    setCopiedKey(key);
+    setTimeout(() => setCopiedKey((k) => (k === key ? null : k)), 2000);
   };
+
+  const CopyButton: React.FC<{ k: string; text: string; title: string }> = ({ k, text, title }) => (
+    <button
+      onClick={() => copyToClipboard(k, text)}
+      className="p-1.5 text-slate-400 hover:text-white rounded bg-slate-800 shrink-0 ml-auto"
+      title={title}
+    >
+      {copiedKey === k ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+    </button>
+  );
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-200">
@@ -77,9 +105,10 @@ export const EnrollDeviceModal: React.FC<EnrollModalProps> = ({ isOpen, onClose,
           <X className="w-4 h-4" />
         </button>
 
-        <h3 className="text-lg font-bold text-slate-100 mb-1">Enroll New Endpoint Agent</h3>
+        <h3 className="text-lg font-bold text-slate-100 mb-1">Create an invite link</h3>
         <p className="text-xs text-slate-400 mb-6">
-          Generate an enrollment code to connect a Windows PC or Android smartphone.
+          One link, reusable for as many devices as you like. The agent it hands out is
+          already configured — whoever runs it types nothing.
         </p>
 
         {!token ? (
@@ -124,24 +153,51 @@ export const EnrollDeviceModal: React.FC<EnrollModalProps> = ({ isOpen, onClose,
               </div>
             </div>
 
-            {/* Assigned Admin Selection */}
+            {/* Label — so an outstanding link is identifiable later, when the only
+                other things distinguishing it are a UUID and a timestamp. */}
             <div>
               <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
-                Assign to Admin (Optional)
+                Name this link (Optional)
               </label>
-              <select
-                value={assignedAdminId}
-                onChange={(e) => setAssignedAdminId(e.target.value)}
-                className="w-full px-3.5 py-2.5 rounded-xl bg-slate-800/80 border border-slate-700 text-sm text-slate-200 focus:outline-none focus:border-sky-500"
-              >
-                <option value="">Unassigned (Super Admin Only)</option>
-                {admins.map((adm) => (
-                  <option key={adm.id} value={adm.id}>
-                    {adm.email}
-                  </option>
-                ))}
-              </select>
+              <input
+                value={label}
+                onChange={(e) => setLabel(e.target.value)}
+                maxLength={120}
+                placeholder="Finance rollout"
+                className="w-full px-3.5 py-2.5 rounded-xl bg-slate-800/80 border border-slate-700 text-sm text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-sky-500"
+              />
             </div>
+
+            {/* Assigned admin. Only a Super Admin picks: an Admin's link is pinned to
+                them server-side, so offering a choice here would be a lie. */}
+            {isSuperAdmin ? (
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
+                  Assign to Admin (Optional)
+                </label>
+                <select
+                  value={assignedAdminId}
+                  onChange={(e) => setAssignedAdminId(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-800/80 border border-slate-700 text-sm text-slate-200 focus:outline-none focus:border-sky-500"
+                >
+                  <option value="">Unassigned (Super Admin Only)</option>
+                  {admins.map((adm) => (
+                    <option key={adm.id} value={adm.id}>
+                      {adm.email}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : (
+              <div className="flex items-start gap-2.5 p-3 rounded-xl bg-slate-800/40 border border-slate-700/60">
+                <Users className="w-3.5 h-3.5 text-sky-400 mt-0.5 shrink-0" />
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  Devices enrolled with this link are assigned to you
+                  {user?.email ? <span className="text-slate-300"> ({user.email})</span> : null}, so
+                  they appear in your panel.
+                </p>
+              </div>
+            )}
 
             {/* Group Selection */}
             <div>
@@ -162,133 +218,117 @@ export const EnrollDeviceModal: React.FC<EnrollModalProps> = ({ isOpen, onClose,
               </select>
             </div>
 
+            {error && (
+              <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 flex items-start gap-2.5">
+                <AlertCircle className="w-3.5 h-3.5 text-rose-400 mt-0.5 shrink-0" />
+                <p className="text-[11px] text-rose-300 leading-relaxed">{error}</p>
+              </div>
+            )}
+
             <div className="pt-3">
               <button
                 type="submit"
                 disabled={loading}
                 className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-sky-500 to-blue-600 hover:from-sky-400 hover:to-blue-500 text-white font-semibold text-sm shadow-lg shadow-sky-500/25 transition-all disabled:opacity-50"
               >
-                {loading ? 'Generating...' : 'Generate Enrollment Token'}
+                {loading ? 'Generating...' : 'Create invite link'}
               </button>
             </div>
           </form>
         ) : (
           <div className="space-y-4">
-            <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-center">
-              <div className="text-xs font-semibold text-emerald-400 uppercase tracking-wider mb-1">
-                Enrollment Token
+            {/* The link is the deliverable now, so it leads. The raw token is kept below
+                for the CLI path, but nobody needs to read it to use the link. */}
+            <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/20">
+              <div className="text-xs font-semibold text-emerald-400 uppercase tracking-wider mb-2">
+                Send this link
               </div>
-              <div className="text-2xl font-mono font-bold text-white tracking-widest my-2">
-                {token}
+              <div className="flex items-center gap-2 p-3 rounded-xl bg-slate-950 border border-slate-800 font-mono text-xs text-sky-300">
+                <span className="truncate">{inviteLink}</span>
+                <CopyButton k="link" text={inviteLink} title="Copy invite link" />
               </div>
-              <p className="text-[11px] text-slate-400">
-                Reusable — does not expire. It can enroll multiple devices; keep it private.
+              <p className="text-[11px] text-slate-400 mt-2 leading-relaxed">
+                Works for <span className="text-slate-300">any number of devices</span>, on
+                Windows and Android alike
+                {selectedGroup ? (
+                  <>
+                    . Everything enrolled with it joins{' '}
+                    <span className="text-slate-300">{selectedGroup.name}</span>
+                  </>
+                ) : null}
+                .
               </p>
             </div>
 
-            {deviceType === 'windows' ? (
-              <div className="space-y-3">
-                <div className="space-y-2">
-                  <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider">
-                    Invite link — paste into the DRS Agent
-                  </label>
-                  <div className="flex items-center gap-2 p-3 rounded-xl bg-slate-950 border border-slate-800 font-mono text-xs text-sky-300">
-                    <span className="truncate">{inviteLink}</span>
-                    <button
-                      onClick={() => copyToClipboard(inviteLink)}
-                      className="p-1.5 text-slate-400 hover:text-white rounded bg-slate-800 shrink-0 ml-auto"
-                      title="Copy invite link"
-                    >
-                      {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                    </button>
-                  </div>
-                  <p className="text-[11px] text-slate-500">
-                    {windowsAgent.available
-                      ? 'Send the recipient this link — it offers them the agent download as well as the code.'
-                      : 'Send the recipient the DRS Agent and this link.'}{' '}
-                    They open the agent, paste the link, choose whether to allow{' '}
-                    <span className="text-slate-300">screen sharing</span> and/or{' '}
-                    <span className="text-slate-300">terminal access</span>, and click Connect.
-                    Their PC appears in this panel under its own computer name.
-                  </p>
-                </div>
+            <div className="p-3 rounded-xl bg-slate-800/40 border border-slate-700/60">
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                <span className="text-slate-200 font-semibold">What the recipient does:</span>{' '}
+                opens the link, downloads the agent, runs it. Nothing to type — the download
+                already knows this server and this invite. On Android they tap{' '}
+                <span className="text-slate-300">Set up agent</span> after installing.
+              </p>
+            </div>
 
-                <details className="text-[11px] text-slate-500">
-                  <summary className="cursor-pointer text-slate-400 hover:text-slate-200">
-                    Prefer the command line?
-                  </summary>
-                  <div className="flex items-center gap-2 mt-2 p-2.5 rounded-xl bg-slate-950 border border-slate-800 font-mono text-xs text-slate-300">
-                    <span className="truncate">
-                      drs-agent.exe enroll -server {window.location.origin} -token {token}
-                    </span>
-                    <button
-                      onClick={() =>
-                        copyToClipboard(
-                          `drs-agent.exe enroll -server ${window.location.origin} -token ${token}`,
-                        )
-                      }
-                      className="p-1.5 text-slate-400 hover:text-white rounded bg-slate-800 shrink-0 ml-auto"
-                      title="Copy command"
-                    >
-                      {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                    </button>
-                  </div>
-                </details>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider">
-                  On the Android device
-                </label>
-                <ol className="text-[11px] text-slate-400 space-y-1 list-decimal list-inside">
-                  <li>Install the DRS Agent APK and open it.</li>
-                  <li>
-                    Enter the server URL{' '}
-                    <span className="font-mono text-slate-300">{window.location.origin}</span>{' '}
-                    and the token above, then tap <span className="text-slate-300">Enroll</span>.
-                  </li>
-                  <li>Approve the screen-capture prompt when an operator starts a session.</li>
-                </ol>
-                <div className="flex items-center gap-2 p-2.5 rounded-xl bg-slate-950 border border-slate-800 font-mono text-xs text-emerald-300">
-                  <span className="truncate">{window.location.origin}</span>
-                  <button
-                    onClick={() => copyToClipboard(window.location.origin)}
-                    className="p-1.5 text-slate-400 hover:text-white rounded bg-slate-800 shrink-0 ml-auto"
-                    title="Copy server URL"
-                  >
-                    {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* What the recipient will actually be offered when they open the link. */}
-            {agent.available === true && (
-              <a
-                href={agent.url}
-                className="flex items-center gap-2.5 p-2.5 rounded-xl bg-slate-800/50 hover:bg-slate-800 border border-slate-700/60 text-[11px] text-slate-400 hover:text-slate-200 transition-colors"
-              >
-                <Download className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-                <span className="flex-1">
-                  The invite link offers the{' '}
-                  {deviceType === 'windows' ? 'Windows agent' : 'Android APK'} for download.
-                  Get a copy yourself.
-                </span>
-              </a>
-            )}
-
-            {agent.available === false && (
+            {/* Nothing staged means the link still carries the token, but the recipient
+                has no software to use it with — say so here rather than let them find
+                out from the recipient. */}
+            {windowsAgent.available === false && androidAgent.available === false && (
               <div className="p-2.5 rounded-xl bg-amber-500/[0.06] border border-amber-500/20 flex items-start gap-2.5">
                 <AlertCircle className="w-3.5 h-3.5 text-amber-400 mt-0.5 shrink-0" />
                 <p className="text-[11px] text-slate-400 leading-relaxed">
-                  No {deviceType === 'windows' ? 'Windows agent' : 'Android APK'} is published
-                  on this server, so the link carries the code only — you will have to send the
-                  agent yourself. To publish one, upload it to{' '}
-                  <span className="font-mono text-slate-300">deploy/downloads/</span> on the
-                  server.
+                  No agent is published on this server, so the link offers no download and
+                  the recipient will have to configure the agent by hand. Stage one by
+                  uploading it to <span className="font-mono text-slate-300">deploy/downloads/</span>{' '}
+                  and setting <span className="font-mono text-slate-300">AGENT_BINARY_DIR</span>.
                 </p>
               </div>
             )}
+
+            {windowsAgent.available === true && (
+              <a
+                href={windowsAgent.url}
+                className="flex items-center gap-2.5 p-2.5 rounded-xl bg-slate-800/50 hover:bg-slate-800 border border-slate-700/60 text-[11px] text-slate-400 hover:text-slate-200 transition-colors"
+              >
+                <Download className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                <span className="flex-1">Download the configured Windows agent yourself</span>
+              </a>
+            )}
+
+            <details className="text-[11px] text-slate-500">
+              <summary className="cursor-pointer text-slate-400 hover:text-slate-200">
+                Enrollment code, and the command-line route
+              </summary>
+              <div className="space-y-2 mt-2">
+                <div className="flex items-center gap-2 p-2.5 rounded-xl bg-slate-950 border border-slate-800 font-mono text-xs text-emerald-300">
+                  <span className="truncate">{token}</span>
+                  <CopyButton k="token" text={token} title="Copy code" />
+                </div>
+                <p className="leading-relaxed">
+                  Only needed for an agent that was not downloaded through this link — an
+                  unconfigured binary, or one already installed.
+                </p>
+                <div className="flex items-center gap-2 p-2.5 rounded-xl bg-slate-950 border border-slate-800 font-mono text-xs text-slate-300">
+                  <span className="truncate">
+                    drs-agent.exe enroll -server {window.location.origin} -token {token}
+                  </span>
+                  <CopyButton
+                    k="cli"
+                    text={`drs-agent.exe enroll -server ${window.location.origin} -token ${token}`}
+                    title="Copy command"
+                  />
+                </div>
+              </div>
+            </details>
+
+            <div className="p-2.5 rounded-xl bg-amber-500/[0.06] border border-amber-500/20 flex items-start gap-2.5">
+              <AlertCircle className="w-3.5 h-3.5 text-amber-400 mt-0.5 shrink-0" />
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                The download is a self-enrolling installer: anyone who runs it joins this
+                organization and it starts with their machine. Treat the link like a
+                password, and revoke it from{' '}
+                <span className="text-slate-300">Invite links</span> once the rollout is done.
+              </p>
+            </div>
 
             <button
               onClick={onClose}

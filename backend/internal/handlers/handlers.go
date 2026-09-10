@@ -289,6 +289,20 @@ func (h *Handler) GenerateEnrollmentToken(w http.ResponseWriter, r *http.Request
 		req.AdminID = &claims.UserID
 	}
 
+	// The team is where the real authority is: every admin on it can view every device
+	// the link enrolls. Without this check, opening the route to Admins would let any of
+	// them mint a link into any team in the org — an escalation, not a convenience.
+	// canSeeGroup is the same rule ListGroups and ListGroupMembers already apply, so a
+	// team the caller cannot see and one that does not exist give the same answer.
+	if req.GroupID != nil && *req.GroupID != "" {
+		if !h.canSeeGroup(claims, *req.GroupID) {
+			h.respondError(w, http.StatusForbidden, "You are not a member of that team")
+			return
+		}
+	} else {
+		req.GroupID = nil
+	}
+
 	// 12 random bytes -> 96 bits, formatted for someone to retype once.
 	raw, err := auth.GenerateSecret(12)
 	if err != nil {
@@ -298,16 +312,21 @@ func (h *Handler) GenerateEnrollmentToken(w http.ResponseWriter, r *http.Request
 	token := "DRS-" + strings.ToUpper(raw)
 	expiresAt := time.Now().Add(enrollmentTokenTTL)
 
+	label := strings.TrimSpace(req.Label)
+	if len(label) > 120 {
+		label = label[:120]
+	}
+
 	var tokenID string
 	// Only the hash is stored: the token is a credential that grants enrollment, so
 	// read access to the database should not be enough to use one.
 	err = h.db.QueryRow(`
 		INSERT INTO enrollment_tokens
-			(org_id, token_hash, device_type, assigned_admin_id, group_id, created_by, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+			(org_id, token_hash, device_type, assigned_admin_id, group_id, created_by, expires_at, label)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''))
 		RETURNING id
 	`, claims.OrgID, auth.HashSecret(token), req.DeviceType,
-		req.AdminID, req.GroupID, claims.UserID, expiresAt).Scan(&tokenID)
+		req.AdminID, req.GroupID, claims.UserID, expiresAt, label).Scan(&tokenID)
 	if err != nil {
 		h.respondError(w, http.StatusInternalServerError, "Failed to create enrollment token")
 		return
@@ -316,12 +335,108 @@ func (h *Handler) GenerateEnrollmentToken(w http.ResponseWriter, r *http.Request
 	h.audit.Log(claims.OrgID, claims.UserID, claims.Email, "create_enrollment_token", "enrollment_token", tokenID, map[string]any{
 		"type":       req.DeviceType,
 		"expires_at": expiresAt,
+		"group_id":   req.GroupID,
+		"label":      label,
 	}, r.RemoteAddr)
 
 	h.respondJSON(w, http.StatusOK, models.GenerateEnrollmentTokenResponse{
+		ID:              tokenID,
 		EnrollmentToken: token,
 		ExpiresAt:       expiresAt,
 	})
+}
+
+// ListEnrollmentTokens shows the invite links that can still enroll devices.
+//
+// This exists because the download endpoint turned a token into an executable: an admin
+// needs to be able to see what is outstanding in order to decide what to revoke. Scoped
+// the way ListGroups is — an Admin sees only links they created, a Super Admin sees the
+// org's. Revoked links stay listed rather than disappearing, because "this link was
+// killed on Tuesday" is the useful answer.
+func (h *Handler) ListEnrollmentTokens(w http.ResponseWriter, r *http.Request) {
+	claims, _ := middleware.GetUserClaims(r)
+
+	query := `
+		SELECT t.id, COALESCE(t.label, ''), t.device_type,
+		       t.group_id, COALESCE(g.name, ''),
+		       t.created_by, COALESCE(u.email, ''), t.created_at,
+		       t.revoked_at, t.expires_at,
+		       (SELECT COUNT(*) FROM devices d WHERE d.enrolled_via_token = t.id)
+		FROM enrollment_tokens t
+		LEFT JOIN device_groups g ON g.id = t.group_id
+		LEFT JOIN users u ON u.id = t.created_by
+		WHERE t.org_id = $1`
+	args := []any{claims.OrgID}
+	if claims.Role != models.RoleSuperAdmin {
+		query += ` AND t.created_by = $2`
+		args = append(args, claims.UserID)
+	}
+	query += ` ORDER BY t.created_at DESC LIMIT 200`
+
+	rows, err := h.db.Query(query, args...)
+	if err != nil {
+		h.respondError(w, http.StatusInternalServerError, "Failed to list enrollment tokens")
+		return
+	}
+	defer rows.Close()
+
+	tokens := []models.EnrollmentTokenSummary{}
+	for rows.Next() {
+		var t models.EnrollmentTokenSummary
+		if err := rows.Scan(&t.ID, &t.Label, &t.DeviceType, &t.GroupID, &t.GroupName,
+			&t.CreatedBy, &t.CreatedByEmail, &t.CreatedAt, &t.RevokedAt, &t.ExpiresAt,
+			&t.DeviceCount); err == nil {
+			tokens = append(tokens, t)
+		}
+	}
+	h.respondJSON(w, http.StatusOK, tokens)
+}
+
+// RevokeEnrollmentToken turns an invite link off.
+//
+// It stops the link enrolling anything new. It deliberately does NOT touch devices the
+// link already enrolled: those hold their own agent secrets, and removing them is a
+// separate decision (delete the device) that an admin should make on purpose rather than
+// as a side effect of tidying up a link.
+func (h *Handler) RevokeEnrollmentToken(w http.ResponseWriter, r *http.Request) {
+	claims, _ := middleware.GetUserClaims(r)
+
+	tokenID := pathSegment(r, 3)
+	if tokenID == "" {
+		h.respondError(w, http.StatusBadRequest, "Invalid path")
+		return
+	}
+	if _, err := uuid.Parse(tokenID); err != nil {
+		h.respondError(w, http.StatusNotFound, "Enrollment token not found")
+		return
+	}
+
+	// An Admin may only revoke their own links. Scoping the UPDATE itself rather than
+	// checking first means a link belonging to someone else reports "not found" instead
+	// of confirming it exists.
+	query := `UPDATE enrollment_tokens
+	          SET revoked_at = NOW(), revoked_by = $2
+	          WHERE id = $1 AND org_id = $3 AND revoked_at IS NULL`
+	args := []any{tokenID, claims.UserID, claims.OrgID}
+	if claims.Role != models.RoleSuperAdmin {
+		query += ` AND created_by = $4`
+		args = append(args, claims.UserID)
+	}
+
+	res, err := h.db.Exec(query, args...)
+	if err != nil {
+		h.respondError(w, http.StatusInternalServerError, "Failed to revoke enrollment token")
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// Already revoked, someone else's, or nonexistent — all the same answer.
+		h.respondError(w, http.StatusNotFound, "Enrollment token not found")
+		return
+	}
+
+	h.audit.Log(claims.OrgID, claims.UserID, claims.Email, "revoke_enrollment_token",
+		"enrollment_token", tokenID, nil, r.RemoteAddr)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // EnrollDevice redeems a token and returns the agent's permanent identity.
@@ -360,17 +475,21 @@ func (h *Handler) EnrollDevice(w http.ResponseWriter, r *http.Request) {
 	h.respondJSON(w, http.StatusOK, models.EnrollDeviceResponse{
 		DeviceID:                 deviceID,
 		AgentSecret:              agentSecret,
-		WSURL:                    agentWSURL(r),
+		WSURL:                    h.agentWSURL(r),
 		HeartbeatIntervalSeconds: int(h.cfg.HeartbeatInterval.Seconds()),
 	})
 }
 
 // redeemToken validates a token and creates the device in one transaction.
 //
-// Tokens are reusable and non-expiring by request: the same token can enroll many
-// devices, so redemption does NOT mark it used and does not check expiry. Each redemption
-// still mints a fresh, unique agent secret and a new device row, so distinct devices
-// never share an identity.
+// Tokens are reusable by request: the same token can enroll many devices, so redemption
+// does NOT mark it used. Each redemption mints a fresh, unique agent secret and its own
+// device row, so distinct devices never share an identity.
+//
+// Reusable is not the same as unstoppable. Revocation and expiry ARE enforced here, and
+// this is the only place they are — the revoke endpoint would be decorative without this
+// clause. That matters more since the download endpoint began baking tokens into agent
+// binaries: the installer is a credential in executable form, and this is its off switch.
 func (h *Handler) redeemToken(req models.EnrollDeviceRequest) (deviceID, orgID, agentSecret string, err error) {
 	tx, err := h.db.Begin()
 	if err != nil {
@@ -384,11 +503,12 @@ func (h *Handler) redeemToken(req models.EnrollDeviceRequest) (deviceID, orgID, 
 		SELECT id, org_id, assigned_admin_id, group_id
 		FROM enrollment_tokens
 		WHERE token_hash = $1
+		  AND revoked_at IS NULL
+		  AND expires_at > NOW()
 	`, auth.HashSecret(req.EnrollmentToken)).Scan(&tokenID, &orgID, &assignedAdminID, &groupID)
 	if err != nil {
 		return "", "", "", errors.New("token not redeemable")
 	}
-	_ = tokenID // retained for readability; no longer used to mark the token consumed
 
 	secret, err := auth.GenerateSecret(32)
 	if err != nil {
@@ -412,14 +532,43 @@ func (h *Handler) redeemToken(req models.EnrollDeviceRequest) (deviceID, orgID, 
 		allowTerminal = *req.AllowTerminal
 	}
 
-	// Identify a device by its system name within the org: re-running the agent on the
-	// same machine re-enrolls that same device row rather than spawning a duplicate that
-	// lingers offline forever. A reusable token can still enroll many *different*
-	// machines, because each has a distinct hostname. Enrolling always mints a fresh
-	// secret, so the previous secret for that machine is invalidated in the same step.
-	err = tx.QueryRow(`
-		SELECT id FROM devices WHERE org_id = $1 AND name = $2 AND type = $3
-	`, orgID, req.Name, req.Type).Scan(&deviceID)
+	// Which existing device, if any, is this machine?
+	//
+	// Prefer the machine id: it is generated once per machine and kept, so it survives a
+	// rename and — critically — distinguishes two machines that share a hostname. Cloned
+	// VMs and imaged corporate fleets routinely do, and matching them on name meant the
+	// second one to enroll took over the first one's row and rotated its secret, leaving
+	// the first agent reconnecting forever with a credential the server had discarded.
+	//
+	// Fall back to (org, name, type) when the agent sends no machine id, so agents built
+	// before this existed keep re-enrolling to their own row instead of duplicating it.
+	machineID := strings.TrimSpace(req.MachineID)
+	if machineID != "" {
+		err = tx.QueryRow(`
+			SELECT id FROM devices WHERE org_id = $1 AND machine_id = $2
+		`, orgID, machineID).Scan(&deviceID)
+
+		// Not found by machine id. That is either a genuinely new machine, or a device
+		// that enrolled before machine ids existed and is now reporting one for the
+		// first time — every device already in the fleet, on its next re-enrollment.
+		//
+		// Adopt by name ONLY when the existing row has claimed no machine id. Without
+		// that condition an upgraded agent would create a second row and leave its own
+		// original lingering offline forever; with it, a clone whose twin has already
+		// claimed a machine id still gets its own row, which is the takeover this
+		// column exists to prevent.
+		if err == sql.ErrNoRows {
+			err = tx.QueryRow(`
+				SELECT id FROM devices
+				WHERE org_id = $1 AND name = $2 AND type = $3 AND machine_id IS NULL
+			`, orgID, req.Name, req.Type).Scan(&deviceID)
+		}
+	} else {
+		err = tx.QueryRow(`
+			SELECT id FROM devices WHERE org_id = $1 AND name = $2 AND type = $3
+		`, orgID, req.Name, req.Type).Scan(&deviceID)
+	}
+
 	switch {
 	case err == sql.ErrNoRows:
 		deviceID = uuid.New().String()
@@ -427,25 +576,30 @@ func (h *Handler) redeemToken(req models.EnrollDeviceRequest) (deviceID, orgID, 
 			INSERT INTO devices
 				(id, org_id, name, type, os_version, agent_secret_hash,
 				 assigned_admin_id, group_id, allow_screen, allow_terminal,
-				 status, metadata, last_seen_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'offline', $11, NOW())
+				 status, metadata, last_seen_at, machine_id, enrolled_via_token)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'offline', $11, NOW(),
+			        NULLIF($12, ''), $13)
 		`, deviceID, orgID, req.Name, req.Type, req.OSVersion, auth.HashSecret(secret),
-			assignedAdminID, groupID, allowScreen, allowTerminal, []byte(metadata)); err != nil {
+			assignedAdminID, groupID, allowScreen, allowTerminal, []byte(metadata),
+			machineID, tokenID); err != nil {
 			return "", "", "", err
 		}
 	case err != nil:
 		return "", "", "", err
 	default:
 		// Existing machine re-enrolling: rotate its secret and re-apply the token's
-		// assignment and the freshly consented capabilities.
+		// assignment and the freshly consented capabilities. The name is refreshed too,
+		// so a renamed machine matched by machine id shows its current hostname.
 		if _, err = tx.Exec(`
 			UPDATE devices
-			SET agent_secret_hash = $2, os_version = $3, assigned_admin_id = $4,
-			    group_id = $5, allow_screen = $6, allow_terminal = $7,
+			SET agent_secret_hash = $2, name = $3, os_version = $4, assigned_admin_id = $5,
+			    group_id = $6, allow_screen = $7, allow_terminal = $8,
+			    machine_id = COALESCE(NULLIF($9, ''), machine_id),
+			    enrolled_via_token = $10,
 			    status = 'offline', last_seen_at = NOW(), updated_at = NOW()
 			WHERE id = $1
-		`, deviceID, auth.HashSecret(secret), req.OSVersion, assignedAdminID,
-			groupID, allowScreen, allowTerminal); err != nil {
+		`, deviceID, auth.HashSecret(secret), req.Name, req.OSVersion, assignedAdminID,
+			groupID, allowScreen, allowTerminal, machineID, tokenID); err != nil {
 			return "", "", "", err
 		}
 	}
@@ -459,14 +613,50 @@ func (h *Handler) redeemToken(req models.EnrollDeviceRequest) (deviceID, orgID, 
 	return deviceID, orgID, secret, nil
 }
 
+// publicBaseURL is the origin this deployment is reachable at, as best the backend can
+// tell from the request it is answering.
+//
+// Two things are derived from it — the WebSocket URL handed to an enrolling agent, and
+// the server address baked into a downloaded agent — and they must agree, so there is one
+// function rather than two derivations that can drift apart.
+//
+// PUBLIC_BASE_URL overrides it. That escape hatch exists because a wrong answer here is
+// unusually expensive: it is written into an agent binary that then cannot reach the
+// server, on a machine nobody is looking at.
+func (h *Handler) publicBaseURL(r *http.Request) string {
+	if h.cfg != nil && h.cfg.PublicBaseURL != "" {
+		return h.cfg.PublicBaseURL
+	}
+	scheme := "http"
+	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		scheme = "https"
+	}
+	// X-Forwarded-Host first: behind a proxy that rewrites Host (nginx's proxy_set_header,
+	// or a dev proxy with changeOrigin), r.Host is the upstream's address, not the one the
+	// browser — or the agent — can reach.
+	host := r.Host
+	if fwd := r.Header.Get("X-Forwarded-Host"); fwd != "" {
+		// A comma-separated chain means several proxies; the first entry is the original.
+		if i := strings.IndexByte(fwd, ','); i >= 0 {
+			fwd = fwd[:i]
+		}
+		host = strings.TrimSpace(fwd)
+	}
+	return scheme + "://" + host
+}
+
 // agentWSURL builds the URL the agent should dial, from the request it arrived on, so
 // a deployment behind any hostname works without extra configuration.
-func agentWSURL(r *http.Request) string {
-	scheme := "ws://"
-	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
-		scheme = "wss://"
+func (h *Handler) agentWSURL(r *http.Request) string {
+	base := h.publicBaseURL(r)
+	switch {
+	case strings.HasPrefix(base, "https://"):
+		return "wss://" + strings.TrimPrefix(base, "https://") + "/ws/agent"
+	case strings.HasPrefix(base, "http://"):
+		return "ws://" + strings.TrimPrefix(base, "http://") + "/ws/agent"
+	default:
+		return "ws://" + base + "/ws/agent"
 	}
-	return scheme + r.Host + "/ws/agent"
 }
 
 // AssignDevice moves a device between admins/groups.

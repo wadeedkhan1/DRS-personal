@@ -23,6 +23,11 @@ type enrollRequest struct {
 	OSVersion       string `json:"os_version"`
 	AllowScreen     bool   `json:"allow_screen"`
 	AllowTerminal   bool   `json:"allow_terminal"`
+	// MachineID identifies the machine rather than its name, so two PCs that happen to
+	// share a hostname — cloned VMs, imaged fleets — enroll as two devices instead of
+	// one of them taking over the other's identity. Omitted when the config directory is
+	// unwritable, in which case the server falls back to de-duplicating on the hostname.
+	MachineID string `json:"machine_id,omitempty"`
 }
 
 type enrollResponse struct {
@@ -61,6 +66,7 @@ func Enroll(serverURL, token, deviceName string) (config.Config, error) {
 		OSVersion:       sysinfo.Info().OS,
 		AllowScreen:     true,
 		AllowTerminal:   true,
+		MachineID:       config.MachineID(),
 	})
 	if err != nil {
 		return config.Config{}, err

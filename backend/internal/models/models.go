@@ -161,14 +161,39 @@ type GenerateEnrollmentTokenRequest struct {
 	DeviceType string  `json:"device_type"` // windows, android
 	GroupID    *string `json:"group_id,omitempty"`
 	AdminID    *string `json:"assigned_admin_id,omitempty"`
+	// Label is a human name for the link ("Finance rollout"), so a list of outstanding
+	// links is something an admin can act on rather than a column of UUIDs.
+	Label string `json:"label,omitempty"`
 }
 
 // GenerateEnrollmentTokenResponse returns a real expiry timestamp rather than a
 // hardcoded "24 hours" string. The old response promised an expiry that nothing
 // enforced, so tokens were valid forever.
 type GenerateEnrollmentTokenResponse struct {
+	// ID identifies the link for revocation. The token itself is a credential and is
+	// never accepted back from a client as an identifier.
+	ID              string    `json:"id"`
 	EnrollmentToken string    `json:"enrollment_token"`
 	ExpiresAt       time.Time `json:"expires_at"`
+}
+
+// EnrollmentTokenSummary is one row of the invite-link list. It deliberately carries no
+// token or hash: the plaintext exists only in the response that created it, and the hash
+// is not something a portal has any use for.
+type EnrollmentTokenSummary struct {
+	ID             string     `json:"id"`
+	Label          string     `json:"label"`
+	DeviceType     string     `json:"device_type"`
+	GroupID        *string    `json:"group_id"`
+	GroupName      string     `json:"group_name"`
+	CreatedBy      *string    `json:"created_by"`
+	CreatedByEmail string     `json:"created_by_email"`
+	CreatedAt      time.Time  `json:"created_at"`
+	RevokedAt      *time.Time `json:"revoked_at"`
+	ExpiresAt      time.Time  `json:"expires_at"`
+	// DeviceCount is how many devices this link has enrolled — the number that decides
+	// whether revoking it is safe.
+	DeviceCount int `json:"device_count"`
 }
 
 type EnrollDeviceRequest struct {
@@ -177,6 +202,13 @@ type EnrollDeviceRequest struct {
 	Type            string          `json:"type"` // windows, android
 	OSVersion       string          `json:"os_version"`
 	Metadata        json.RawMessage `json:"metadata,omitempty"`
+
+	// MachineID is a stable per-machine identifier the agent generates once and keeps.
+	// It is what devices are de-duplicated on when present, because hostnames are not
+	// unique across cloned VMs and imaged fleets — and a collision there silently
+	// authenticates one machine out of the other's identity. Omitted by agents built
+	// before it existed, which fall back to (org, name, type).
+	MachineID string `json:"machine_id,omitempty"`
 
 	// Capabilities this device is enrolled with. Pointers so "not sent" is distinct from
 	// "sent false": the Android agent omits them and gets the defaults (screen on,

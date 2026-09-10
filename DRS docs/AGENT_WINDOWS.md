@@ -33,10 +33,56 @@ the PE subsystem is GUI (no console window), and that libvpx was linked statical
 ## How it works
 
 ### 1. Enrollment (once)
-The user pastes the invite link (`https://server/enroll?token=DRS-…`) into the GUI and clicks
-Connect. `internal/enroll` POSTs `/api/devices/enroll` and gets back `deviceId`,
-`agentSecret`, `wsUrl`, and the heartbeat interval. That identity is written **0600** to
-`%AppData%\drs\agent.json` (`internal/config`). Logs go next to it, `agent.log`.
+
+There are three routes in, and all of them end in the same `internal/enroll` call, so they
+cannot behave differently:
+
+**Zero-touch (the normal one).** A binary downloaded from an invite link carries its own
+configuration, appended by the backend as it streamed the file:
+
+```
+<base drs-agent.exe bytes>
+<config JSON>              N bytes   {"serverUrl":"…","token":"DRS-…","autostart":true}
+<uint32 little-endian N>   4 bytes
+"DRSCFG\x00\x01"           8 bytes
+```
+
+`internal/config/embedded.go` reads it back from `os.Executable()` — the file, not the
+loaded image, because the trailer sits past the last PE section and is never mapped.
+Reading our own executable while it runs is fine: the loader opens the image with
+`FILE_SHARE_READ`. The magic is *last* so a reader seeks to a fixed offset from the end and
+gives up after 12 bytes on a binary that has no trailer, which is the common case for a
+developer build and must never be misread as configured.
+
+`selfEnroll()` in `cmd/agent/main.go` runs this before the window appears: if already
+enrolled it does nothing (re-enrolling would rotate the secret on every launch), otherwise
+it enrolls, saves, and calls `installAutostart`. Every failure is non-fatal and falls
+through to the GUI form **pre-filled** from the same trailer — a transient network error
+should leave the user one click from retrying, not stuck. A damaged trailer is logged
+rather than ignored: it means a truncated download, which is otherwise invisible.
+
+The format is defined by `backend/pkg/agentcfg`, which has the round-trip tests; this side
+re-declares the eleven bytes of framing because the agent is a separate Go module.
+
+**By hand.** The user pastes the invite link into the GUI and clicks Connect. `splitInvite`
+pulls the server and token out of whatever they pasted — full link, bare server URL, or
+`host:port`.
+
+**Headless.** `drs-agent enroll -server … -token … [-name …]`.
+
+All three POST `/api/devices/enroll` and get back `deviceId`, `agentSecret`, `wsUrl`, and
+the heartbeat interval. That identity is written **0600** to `%AppData%\drs\agent.json`
+(`internal/config`). Logs go next to it, `agent.log`.
+
+**Machine identity.** The request also carries a `machine_id`: a random UUID generated once
+and kept in `%AppData%\drs\machine-id`, *separate* from the identity file because it must
+survive re-enrollment — it is what says "this is the same physical machine", which a new
+identity explicitly is not. The server de-duplicates on it instead of the hostname, because
+one invite link rolled across a fleet hits cloned VMs and imaged PCs that share a name, and
+matching on the name meant the second machine took over the first's row and invalidated its
+secret. A random value rather than a hardware serial or `MachineGuid`: those need WMI or the
+registry and a clone copies them too, whereas a value generated *after* the clone is made is
+exactly the property wanted.
 
 The enroll request always sends `allow_screen: true` and `allow_terminal: true` — there is no
 per-machine capability picker in the GUI and no `-screen` / `-terminal` flags on the CLI, so
@@ -47,7 +93,6 @@ it stores them per device and checks them on every session. Changing them for a 
 already enrolled currently means re-enrolling it (or editing the row); there is no portal
 control for it yet.
 
-The same thing is available headless: `drs-agent enroll -server … -token … [-name …]`.
 
 ### 2. Staying connected
 `internal/conn` dials `wsUrl`, sends `hello` (device id + secret), and expects `welcome`.
@@ -73,6 +118,12 @@ start_session → session_ready → offer → (browser) answer → ICE trickles 
 `internal/screen` clamps the requested fps (1–60, default 24) and width (320–3840, default
 1280) so a bad command cannot ask for a firehose, and picks a bitrate from
 `w*h*fps/6` clamped to 1.2–8 Mbps.
+
+Those two numbers used to be the same for every session (`SESSION_FPS` / `SESSION_MAX_WIDTH`).
+They are now **per session**: a viewer may ask for less on `/ws/session`, which is how the
+portal's monitoring wall runs its tiles at 4fps/480px. Nothing changed on this side — the
+server clamps to the same bounds before sending, and the clamp here is unchanged and still
+the last word.
 
 **The capture pipeline** (`internal/screen/pipeline.go`) is the performance-critical part:
 

@@ -4,7 +4,7 @@
  * NOTE the casing split: this REST body is snake_case, unlike everything on the
  * WebSocket, which is camelCase. The response is camelCase.
  */
-import {deriveWsUrl, Identity} from '../config/storage';
+import {deriveWsUrl, getMachineId, Identity} from '../config/storage';
 import {getDeviceTelemetry} from '../telemetry';
 import {log} from '../log';
 
@@ -26,6 +26,7 @@ export async function enroll(
 ): Promise<Identity> {
   const base = serverUrl.trim().replace(/\/+$/, '');
   const telemetry = await getDeviceTelemetry();
+  const machineId = await getMachineId();
   log(`enrolling at ${base} as "${name}" (${telemetry.osVersion})`);
 
   const res = await fetch(`${base}/api/devices/enroll`, {
@@ -36,6 +37,9 @@ export async function enroll(
       name: name.trim(),
       type: 'android',
       os_version: telemetry.osVersion,
+      // Omitted when storage is unavailable; the server then falls back to
+      // de-duplicating on the device name, which is what it did before this existed.
+      ...(machineId ? {machine_id: machineId} : {}),
     }),
   });
 

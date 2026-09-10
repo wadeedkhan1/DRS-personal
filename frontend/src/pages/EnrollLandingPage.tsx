@@ -1,21 +1,24 @@
 import React, { useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { Shield, Copy, Check, Monitor, Smartphone, AlertCircle, Download } from 'lucide-react';
-import { useAgentDownload } from '../hooks/useAgentDownload';
+import { Shield, Copy, Check, Monitor, Smartphone, AlertCircle, Download, Zap } from 'lucide-react';
+import { useAgentDownload, androidSetupLink } from '../hooks/useAgentDownload';
 
 /**
  * Where an invite link lands when somebody clicks it.
  *
- * EnrollDeviceModal hands out `${origin}/enroll?token=…`. The link is also what gets
- * pasted into the agent, but people click links, and before this route existed that click
- * produced a blank page.
- *
- * This page does not enroll anything — enrollment is the agent posting to
+ * This page still does not enroll anything itself — enrollment is the agent posting to
  * /api/devices/enroll from the machine being enrolled, sending its real hostname and OS
- * and receiving a device secret it stores locally. A browser cannot do that. What the page
- * does is hand over the two things the recipient needs: the agent binary and the token.
- * Before it served the binary, the token arrived here with no way to obtain the software
- * it belongs to, and the admin had to send the agent through some other channel.
+ * and receiving a device secret it stores locally. A browser cannot do that.
+ *
+ * What changed is that the recipient no longer has to carry anything across. The Windows
+ * download is personalised per invite: the backend appends this server's address and this
+ * token to the binary, so running it is the whole procedure. Android cannot be
+ * personalised the same way — the system renames an installed APK to base.apk and an app
+ * cannot read its own installer — so the phone gets a `drs://` link instead, which is
+ * what the "Set up the agent" button fires.
+ *
+ * The code is still shown, in a disclosure, for the case this page cannot serve: an
+ * agent that is already installed, or one obtained some other way.
  *
  * It is public because whoever installs an agent generally has no portal account.
  */
@@ -24,8 +27,13 @@ export const EnrollLandingPage: React.FC = () => {
   const token = params.get('token');
   const [copied, setCopied] = useState(false);
 
-  const windowsAgent = useAgentDownload('windows');
-  const androidAgent = useAgentDownload('android');
+  const windowsAgent = useAgentDownload('windows', token ?? undefined);
+  const androidAgent = useAgentDownload('android', token ?? undefined);
+
+  // Rough, and deliberately so: it only decides which platform's instructions to lead
+  // with, and both remain reachable either way.
+  const looksAndroid = /android/i.test(navigator.userAgent);
+  const setupLink = token ? androidSetupLink(window.location.origin, token) : '';
 
   const copy = (text: string) => {
     navigator.clipboard.writeText(text);
@@ -74,11 +82,28 @@ export const EnrollLandingPage: React.FC = () => {
             </div>
           ) : (
             <>
-              {/* Step 1 — the software. First because the token is useless without it. */}
+              {/* Step 1 — the software, which for Windows is also the configuration. */}
               <div className="mb-7">
                 {stepLabel(1, 'Download the agent')}
 
                 <div className="space-y-2">
+                  {/* Android first on a phone: the order the person will actually use. */}
+                  {looksAndroid && androidAgent.available && (
+                    <a
+                      href={androidAgent.url}
+                      className="flex items-center gap-3 p-3.5 rounded-xl bg-slate-800/60 hover:bg-slate-800 border border-slate-700/60 hover:border-emerald-500/50 transition-all group"
+                    >
+                      <Smartphone className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm font-semibold text-slate-200">Android agent</div>
+                        <div className="text-[11px] text-slate-500">
+                          Android 8.0+ · drs-agent.apk
+                        </div>
+                      </div>
+                      <Download className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 shrink-0 transition-colors" />
+                    </a>
+                  )}
+
                   {windowsAgent.available && (
                     <a
                       href={windowsAgent.url}
@@ -90,14 +115,14 @@ export const EnrollLandingPage: React.FC = () => {
                           Windows agent
                         </div>
                         <div className="text-[11px] text-slate-500">
-                          Windows 10, 11 and Server · drs-agent.exe
+                          Windows 10, 11 and Server · already configured
                         </div>
                       </div>
                       <Download className="w-4 h-4 text-slate-500 group-hover:text-sky-400 shrink-0 transition-colors" />
                     </a>
                   )}
 
-                  {androidAgent.available && (
+                  {!looksAndroid && androidAgent.available && (
                     <a
                       href={androidAgent.url}
                       className="flex items-center gap-3 p-3.5 rounded-xl bg-slate-800/60 hover:bg-slate-800 border border-slate-700/60 hover:border-emerald-500/50 transition-all group"
@@ -134,37 +159,18 @@ export const EnrollLandingPage: React.FC = () => {
                 )}
               </div>
 
-              {/* Step 2 — the credential. */}
-              <div className="mb-7 pt-6 border-t border-slate-800">
-                {stepLabel(2, 'Copy your enrollment code')}
-                <div className="flex items-center gap-2">
-                  <code className="flex-1 px-3.5 py-3 rounded-xl bg-slate-950/80 border border-slate-800 text-sm font-mono text-sky-300 break-all">
-                    {token}
-                  </code>
-                  <button
-                    onClick={() => copy(token)}
-                    title="Copy code"
-                    className="p-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700/60 transition-colors shrink-0"
-                  >
-                    {copied ? (
-                      <Check className="w-4 h-4 text-emerald-400" />
-                    ) : (
-                      <Copy className="w-4 h-4" />
-                    )}
-                  </button>
-                </div>
-              </div>
-
-              {/* Step 3 — what to actually do with the two. */}
+              {/* Step 2 — what to do with it. Short, because on Windows there is
+                  nothing to do beyond running the file. */}
               <div className="space-y-4 pt-6 border-t border-slate-800">
-                {stepLabel(3, 'Install and connect')}
+                {stepLabel(2, 'Run it')}
 
                 <div className="flex items-start gap-3">
                   <Monitor className="w-4 h-4 text-sky-400 mt-0.5 shrink-0" />
                   <div className="text-xs text-slate-400 leading-relaxed">
-                    <span className="text-slate-200 font-semibold">Windows —</span> run the DRS
-                    Agent on the PC you want monitored, paste this link or code into it, choose
-                    whether to share the screen and terminal, and click Enroll.
+                    <span className="text-slate-200 font-semibold">Windows —</span> run the
+                    file you just downloaded on the PC you want monitored. That is the whole
+                    procedure: it already knows this server and this invite, connects itself,
+                    and starts with the PC from then on.
                   </div>
                 </div>
 
@@ -172,18 +178,71 @@ export const EnrollLandingPage: React.FC = () => {
                   <Smartphone className="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" />
                   <div className="text-xs text-slate-400 leading-relaxed">
                     <span className="text-slate-200 font-semibold">Android —</span> install the
-                    APK on the handset, open it, and paste this code when prompted.
+                    APK, then tap the button below. Approve the screen-capture prompt when an
+                    operator starts a session.
                   </div>
                 </div>
+
+                {/* The phone's equivalent of the configured .exe. Always offered, not
+                    only on Android: someone may be reading this page on a laptop and
+                    forwarding the link to the handset. */}
+                <a
+                  href={setupLink}
+                  className="flex items-center gap-3 p-3.5 rounded-xl bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 transition-all"
+                >
+                  <Zap className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-semibold text-emerald-300">
+                      Set up the agent
+                    </div>
+                    <div className="text-[11px] text-slate-400">
+                      Android only · opens the installed app and enrolls it
+                    </div>
+                  </div>
+                </a>
 
                 <div className="p-3.5 rounded-xl bg-amber-500/[0.06] border border-amber-500/20 flex items-start gap-2.5">
                   <AlertCircle className="w-3.5 h-3.5 text-amber-400 mt-0.5 shrink-0" />
                   <p className="text-[11px] text-slate-400 leading-relaxed">
                     Run the agent on the device you want monitored — opening this page in a
-                    browser does not enroll anything. Treat the code like a password: anyone
-                    holding it can enroll a device into this organization.
+                    browser does not enroll anything. Once it runs, an authorised operator
+                    can view that device's screen. Treat this link like a password: anyone
+                    who opens it can enroll a device into this organization.
                   </p>
                 </div>
+
+                {/* The manual route, for an agent that did not come from this page. */}
+                <details className="text-[11px] text-slate-500">
+                  <summary className="cursor-pointer text-slate-400 hover:text-slate-200">
+                    Already have the agent installed?
+                  </summary>
+                  <div className="mt-2 space-y-2">
+                    <p className="leading-relaxed">
+                      Enter this server address and code into it by hand.
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <code className="flex-1 px-3 py-2.5 rounded-xl bg-slate-950/80 border border-slate-800 text-xs font-mono text-slate-300 break-all">
+                        {window.location.origin}
+                      </code>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <code className="flex-1 px-3 py-2.5 rounded-xl bg-slate-950/80 border border-slate-800 text-xs font-mono text-sky-300 break-all">
+                        {token}
+                      </code>
+                      <button
+                        onClick={() => copy(token)}
+                        title="Copy code"
+                        className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700/60 transition-colors shrink-0"
+                      >
+                        {copied ? (
+                          <Check className="w-4 h-4 text-emerald-400" />
+                        ) : (
+                          <Copy className="w-4 h-4" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                </details>
               </div>
             </>
           )}

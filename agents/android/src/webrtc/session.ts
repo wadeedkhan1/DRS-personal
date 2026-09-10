@@ -34,6 +34,22 @@ function candType(candidate: string): string {
   return m ? m[1] : '?';
 }
 
+// Bounds mirroring agents/windows/internal/screen/webrtc.go, so both agents interpret the
+// same start_session the same way.
+const MIN_FPS = 1;
+const MAX_FPS = 60;
+const DEFAULT_FPS = 24;
+const MIN_MAX_WIDTH = 320;
+const MAX_MAX_WIDTH = 3840;
+const DEFAULT_MAX_WIDTH = 1280;
+
+function clamp(v: number | undefined, lo: number, hi: number, def: number): number {
+  if (!v || v <= 0) {
+    return def;
+  }
+  return Math.min(Math.max(v, lo), hi);
+}
+
 /** Acquire the screen MediaStream. Injected so the UI can drive the consent flow. */
 export type AcquireStream = () => Promise<MediaStream>;
 
@@ -109,6 +125,8 @@ export class VP8Session {
       pc.addTrack(track, this.stream as MediaStream);
     });
 
+    await this.applyQuality(pc);
+
     // Trickle local candidates. OMIT optional fields when absent — a defaulted
     // sdpMLineIndex of 0 is silently accepted and then never connects.
     (pc as any).addEventListener('icecandidate', (event: any) => {
@@ -173,6 +191,48 @@ export class VP8Session {
     };
     log(`-> offer sent (sdp ${sdp.sdp?.length ?? 0} bytes)`);
     this.send(encode(MsgType.Offer, sdp));
+  }
+
+  /**
+   * Apply the fps and width the server asked for.
+   *
+   * Android's MediaProjection captures at the display's own resolution and rate whatever
+   * we ask of getDisplayMedia, so unlike the Windows agent — which scales in its own
+   * capture pipeline — the only lever here is the encoder's. `scaleResolutionDownBy` and
+   * `maxFramerate` are applied to the sender, which is what makes a monitoring-wall tile
+   * (4fps at 480px) cost a fraction of a full session rather than the same.
+   *
+   * Best-effort: an implementation that ignores these still streams, just at full rate.
+   */
+  private async applyQuality(pc: RTCPeerConnection): Promise<void> {
+    const fps = clamp(this.cmd.fps, MIN_FPS, MAX_FPS, DEFAULT_FPS);
+    const maxWidth = clamp(this.cmd.maxWidth, MIN_MAX_WIDTH, MAX_MAX_WIDTH, DEFAULT_MAX_WIDTH);
+
+    const sender = (pc.getSenders() as any[]).find(s => s.track?.kind === 'video');
+    if (!sender) {
+      return;
+    }
+
+    // The capture track reports the display's size once it is live; without it there is
+    // nothing to scale against, so leave the resolution alone and just cap the rate.
+    const settings = (sender.track?.getSettings?.() ?? {}) as {width?: number};
+    const srcWidth = settings.width ?? 0;
+    const scale = srcWidth > maxWidth ? srcWidth / maxWidth : 1;
+
+    try {
+      const params = sender.getParameters();
+      params.encodings = [
+        {
+          ...(params.encodings?.[0] ?? {}),
+          maxFramerate: fps,
+          scaleResolutionDownBy: scale,
+        },
+      ];
+      await sender.setParameters(params);
+      log(`quality: ${fps}fps maxW=${maxWidth} (src=${srcWidth || '?'} scale=${scale.toFixed(2)})`);
+    } catch (e) {
+      log(`could not apply quality (streaming at full rate): ${String(e)}`);
+    }
   }
 
   /** Apply the browser's answer and flush candidates that arrived first. */

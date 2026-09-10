@@ -14,6 +14,7 @@ import {
   X,
   AlertCircle,
   ChevronRight,
+  LayoutGrid,
 } from 'lucide-react';
 
 /**
@@ -148,6 +149,16 @@ export const TeamsPage: React.FC = () => {
                   <span>{isSuperAdmin ? 'Manage' : 'View'}</span>
                   <ChevronRight className="w-3.5 h-3.5" />
                 </Link>
+
+                {group.device_count > 0 && (
+                  <Link
+                    to={`/teams/${group.id}/monitor`}
+                    title="Open the monitoring wall for this team"
+                    className="py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700/60 transition-colors"
+                  >
+                    <LayoutGrid className="w-3.5 h-3.5" />
+                  </Link>
+                )}
 
                 {isSuperAdmin && (
                   <>

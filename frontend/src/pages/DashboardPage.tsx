@@ -93,15 +93,16 @@ export const DashboardPage: React.FC = () => {
             <RefreshCw className="w-4 h-4" />
           </button>
 
-          {isSuperAdmin && (
-            <button
-              onClick={() => setIsEnrollModalOpen(true)}
-              className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-sky-500 to-blue-600 hover:from-sky-400 hover:to-blue-500 text-white text-xs font-semibold shadow-lg shadow-sky-500/20 transition-all"
-            >
-              <Plus className="w-4 h-4" />
-              <span>Enroll Device</span>
-            </button>
-          )}
+          {/* Open to both roles. An Admin's invite link is pinned to them and may only
+              target a team they are on, so it can grant no access they do not already
+              have — see GenerateEnrollmentToken. */}
+          <button
+            onClick={() => setIsEnrollModalOpen(true)}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-sky-500 to-blue-600 hover:from-sky-400 hover:to-blue-500 text-white text-xs font-semibold shadow-lg shadow-sky-500/20 transition-all"
+          >
+            <Plus className="w-4 h-4" />
+            <span>Invite devices</span>
+          </button>
         </div>
       </div>
 
