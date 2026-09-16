@@ -27,6 +27,13 @@ start "DRS Backend" cmd /k "cd /d %~dp0backend && go run ./cmd/server"
 
 timeout /t 3 >nul
 
+if not exist "%~dp0frontend\node_modules" (
+    echo Installing frontend dependencies (npm install)...
+    pushd "%~dp0frontend"
+    call npm install
+    popd
+)
+
 echo 2. Portal (port 3000)
 start "DRS Portal" cmd /k "cd /d %~dp0frontend && npm run dev"
 

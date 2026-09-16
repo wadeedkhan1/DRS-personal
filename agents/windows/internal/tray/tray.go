@@ -1,4 +1,4 @@
-// Package tray shows the on-device indicator.
+// Package tray shows the on-device indicator and minimal system tray menu.
 //
 // This is a compliance requirement, not decoration: SRS FR-5.5 and assumption A4 both
 // call for a visible sign on the monitored machine, and employee-monitoring law in many
@@ -23,50 +23,85 @@ const (
 	Online
 	// InSession means someone is watching this screen right now.
 	InSession
+	// Unenrolled means the agent is not yet paired with a server.
+	Unenrolled
 )
 
-// Controller updates the indicator.
-type Controller struct {
-	mu       sync.Mutex
-	statusMI *systray.MenuItem
-	ready    bool
+// Callbacks holds the user action handlers for menu items.
+type Callbacks struct {
+	OnReconnect    func()
+	OnChangeConfig func()
+	OnQuit         func()
 }
 
-// Run starts the tray and blocks until Quit is called or the menu is used to exit.
-//
-// systray must own the main goroutine on Windows, so this is called from main and the
-// real work happens in the callback.
-func Run(onReady func(c *Controller), onExit func()) {
-	c := &Controller{}
+// Controller updates the tray indicator and menu labels.
+type Controller struct {
+	mu        sync.Mutex
+	statusMI  *systray.MenuItem
+	serverMI  *systray.MenuItem
+	ready     bool
+	callbacks Callbacks
+}
+
+// Run starts the system tray loop and blocks until Quit is called or the menu is used to exit.
+// systray must own the main goroutine on Windows.
+func Run(callbacks Callbacks, onReady func(c *Controller), onExit func()) {
+	c := &Controller{callbacks: callbacks}
+
 	systray.Run(func() {
 		systray.SetIcon(iconOffline)
 		systray.SetTitle("DRS Agent")
 		systray.SetTooltip("DRS Agent — starting")
 
 		c.mu.Lock()
-		c.statusMI = systray.AddMenuItem("Starting…", "Current connection status")
+		c.statusMI = systray.AddMenuItem("Status: Starting…", "Current connection status")
 		c.statusMI.Disable()
+
+		c.serverMI = systray.AddMenuItem("Server: (connecting…)", "Target DRS server")
+		c.serverMI.Disable()
+
 		systray.AddSeparator()
-		quit := systray.AddMenuItem("Quit DRS Agent", "Disconnect and exit")
+
+		reconnectMI := systray.AddMenuItem("Reconnect", "Force immediate reconnection to the server")
+		configMI := systray.AddMenuItem("Change Server / Token…", "Configure server address or enrollment token")
+
+		systray.AddSeparator()
+
+		quitMI := systray.AddMenuItem("Quit DRS Agent", "Disconnect and exit")
 		c.ready = true
 		c.mu.Unlock()
 
 		go func() {
-			<-quit.ClickedCh
-			systray.Quit()
+			for {
+				select {
+				case <-reconnectMI.ClickedCh:
+					if c.callbacks.OnReconnect != nil {
+						go c.callbacks.OnReconnect()
+					}
+				case <-configMI.ClickedCh:
+					if c.callbacks.OnChangeConfig != nil {
+						go c.callbacks.OnChangeConfig()
+					}
+				case <-quitMI.ClickedCh:
+					if c.callbacks.OnQuit != nil {
+						c.callbacks.OnQuit()
+					}
+					systray.Quit()
+					return
+				}
+			}
 		}()
 
 		onReady(c)
 	}, onExit)
 }
 
-// Quit tears the tray down, which unblocks Run.
-func Quit() { systray.Quit() }
+// Quit tears down the system tray.
+func Quit() {
+	systray.Quit()
+}
 
-// Set updates the icon, tooltip and menu label.
-//
-// Safe to call from the socket goroutine, and safe to call before the tray finishes
-// initialising: the status item is simply skipped until it exists.
+// Set updates the tray icon, tooltip, and status menu label.
 func (c *Controller) Set(s Status) {
 	c.mu.Lock()
 	ready := c.ready
@@ -77,13 +112,20 @@ func (c *Controller) Set(s Status) {
 	var label, tooltip string
 	switch s {
 	case InSession:
-		icon, label = iconInSession, "Screen is being viewed"
+		icon = iconInSession
+		label = "Status: Screen is being viewed (Active)"
 		tooltip = "DRS Agent — your screen is being viewed"
 	case Online:
-		icon, label = iconOnline, "Connected"
+		icon = iconOnline
+		label = "Status: Connected"
 		tooltip = "DRS Agent — connected"
+	case Unenrolled:
+		icon = iconOffline
+		label = "Status: Not enrolled"
+		tooltip = "DRS Agent — not enrolled"
 	default:
-		icon, label = iconOffline, "Reconnecting…"
+		icon = iconOffline
+		label = "Status: Reconnecting…"
 		tooltip = "DRS Agent — reconnecting"
 	}
 
@@ -97,7 +139,24 @@ func (c *Controller) Set(s Status) {
 	}
 }
 
-// SetFatal shows a permanent error state, used when the server has revoked this device.
+// SetServer updates the server display item in the tray menu.
+func (c *Controller) SetServer(serverURL string) {
+	c.mu.Lock()
+	ready := c.ready
+	item := c.serverMI
+	c.mu.Unlock()
+
+	if !ready || item == nil {
+		return
+	}
+	if serverURL == "" {
+		item.SetTitle("Server: (not configured)")
+	} else {
+		item.SetTitle("Server: " + serverURL)
+	}
+}
+
+// SetFatal shows a permanent error state when the server revokes or rejects the device.
 func (c *Controller) SetFatal(reason string) {
 	c.mu.Lock()
 	item := c.statusMI
@@ -111,6 +170,6 @@ func (c *Controller) SetFatal(reason string) {
 	systray.SetIcon(iconOffline)
 	systray.SetTooltip("DRS Agent — " + reason)
 	if item != nil {
-		item.SetTitle(reason)
+		item.SetTitle("Status: " + reason)
 	}
 }

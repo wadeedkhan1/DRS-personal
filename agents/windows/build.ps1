@@ -17,7 +17,8 @@ param(
     # parameter 'Path' because it is an empty string" for exactly the invocation the
     # README recommends, and works when you test it from an open session.
     [string]$OutDir,
-    [string]$Name     = 'drs-agent.exe'
+    [string]$Name     = 'drs-agent.exe',
+    [switch]$Strip
 )
 
 $ErrorActionPreference = 'Stop'
@@ -39,25 +40,28 @@ $exe = Join-Path $OutDir $Name
 
 Write-Host 'Building agent...' -ForegroundColor Cyan
 
-# Symbols are deliberately NOT stripped (-s -w): the vpx_codec check below reads them,
-# and they make a crash report from a user's machine actionable.
+$ldflags = '-H windowsgui -linkmode external -extldflags -static'
+if ($Strip) { $ldflags += ' -s -w' }
+
 # -H windowsgui       no console window when the user double-clicks it
 # -linkmode external  hand linking to gcc, which CGO requires
 # -extldflags -static statically link libvpx so no DLL has to ship alongside
-go build -trimpath -ldflags '-H windowsgui -linkmode external -extldflags -static' -o $exe ./cmd/agent
+go build -trimpath -ldflags $ldflags -o $exe ./cmd/agent
 if ($LASTEXITCODE -ne 0) { throw 'go build failed' }
 
 Write-Host "Built $exe" -ForegroundColor Green
 
 # --- Verification ---------------------------------------------------------------
 
-Write-Host 'Verifying VP8 encoder is linked in...' -ForegroundColor Cyan
-$symbols = & go tool nm $exe 2>$null | Select-String -Pattern 'vpx_codec' -SimpleMatch
-if (-not $symbols) {
-    Remove-Item $exe -Force
-    throw 'No vpx_codec symbols found: this binary cannot encode video. Check that CGO is enabled and libvpx is installed.'
+if (-not $Strip) {
+    Write-Host 'Verifying VP8 encoder is linked in...' -ForegroundColor Cyan
+    $symbols = & go tool nm $exe 2>$null | Select-String -Pattern 'vpx_codec' -SimpleMatch
+    if (-not $symbols) {
+        Remove-Item $exe -Force
+        throw 'No vpx_codec symbols found: this binary cannot encode video. Check that CGO is enabled and libvpx is installed.'
+    }
+    Write-Host "  libvpx symbols present ($($symbols.Count) matches)" -ForegroundColor Green
 }
-Write-Host "  libvpx symbols present ($($symbols.Count) matches)" -ForegroundColor Green
 
 Write-Host 'Verifying no console window...' -ForegroundColor Cyan
 # The PE subsystem byte lives at the offset named by the PE header pointer at 0x3C.

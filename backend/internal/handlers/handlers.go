@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -641,6 +642,16 @@ func (h *Handler) publicBaseURL(r *http.Request) string {
 			fwd = fwd[:i]
 		}
 		host = strings.TrimSpace(fwd)
+	}
+	// If the request came through the frontend dev server (Vite on :3000), the backend
+	// listening port is h.cfg.Port (default 8080). In production (Nginx on 80/443),
+	// this is a no-op.
+	if hName, p, err := net.SplitHostPort(host); err == nil && p == "3000" {
+		backendPort := "8080"
+		if h.cfg != nil && h.cfg.Port != "" {
+			backendPort = h.cfg.Port
+		}
+		host = net.JoinHostPort(hName, backendPort)
 	}
 	return scheme + "://" + host
 }

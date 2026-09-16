@@ -19,7 +19,7 @@ one-shot shell commands on request.
 | Downscale + colour convert | Hand-written parallel RGBA → I420 box filter | `internal/screen/convert.go` |
 | Video encode | `pion/mediadevices` VP8 (libvpx via CGO) | `internal/screen/webrtc.go` |
 | WebRTC transport | `pion/webrtc/v4` (DTLS-SRTP, trickle ICE) | `internal/screen/webrtc.go` |
-| Desktop GUI + tray | `fyne.io/fyne/v2` + `fyne.io/systray` | `internal/gui` |
+| System tray | `fyne.io/systray` (Win32 `Shell_NotifyIcon`) | `internal/tray` |
 | Telemetry | `shirou/gopsutil/v4` (CPU, RAM, OS) | `internal/sysinfo` |
 | Autostart / single-instance | `golang.org/x/sys/windows` (HKCU Run key, named mutex) | `cmd/agent/platform_windows.go` |
 | Command runner | `os/exec` → `powershell.exe` / `cmd.exe` | `internal/terminal` |
@@ -54,21 +54,11 @@ Reading our own executable while it runs is fine: the loader opens the image wit
 gives up after 12 bytes on a binary that has no trailer, which is the common case for a
 developer build and must never be misread as configured.
 
-`selfEnroll()` in `cmd/agent/main.go` runs this before the window appears: if already
-enrolled it does nothing (re-enrolling would rotate the secret on every launch), otherwise
-it enrolls, saves, and calls `installAutostart`. Every failure is non-fatal and falls
-through to the GUI form **pre-filled** from the same trailer — a transient network error
-should leave the user one click from retrying, not stuck. A damaged trailer is logged
-rather than ignored: it means a truncated download, which is otherwise invisible.
+On launch, the agent starts silently with zero popups or notifications and docks directly into the system tray. If the device is already enrolled, it connects immediately. If not enrolled, it reads the embedded configuration and self-enrolls with up to 3 automatic retries. If configured for autostart, it registers the login entry.
 
-The format is defined by `backend/pkg/agentcfg`, which has the round-trip tests; this side
-re-declares the eleven bytes of framing because the agent is a separate Go module.
+**Headless CLI.** `drs-agent enroll -server … -token … [-name …]`.
 
-**By hand.** The user pastes the invite link into the GUI and clicks Connect. `splitInvite`
-pulls the server and token out of whatever they pasted — full link, bare server URL, or
-`host:port`.
-
-**Headless.** `drs-agent enroll -server … -token … [-name …]`.
+**Manual Tray.** Right-clicking the tray icon and choosing `Change Server / Token…` allows entering or updating the server URL and token.
 
 All three POST `/api/devices/enroll` and get back `deviceId`, `agentSecret`, `wsUrl`, and
 the heartbeat interval. That identity is written **0600** to `%AppData%\drs\agent.json`
@@ -159,14 +149,24 @@ are captured into a single frame.
   machine-wide changes needing Administrator.
 - Each command gets its own goroutine so a slow one never stalls the socket reader.
 
-### 5. GUI and lifecycle
-`internal/gui` owns the main goroutine (Windows requires the tray message pump there). It
-shows the enrollment form when unenrolled, otherwise a live status view. Closing the window
-hides to tray; quitting is deliberate via the tray menu. Tray icon: ⚪ reconnecting,
-🟢 connected, 🔴 screen being viewed.
+### 5. Lifecycle and System Tray
+`internal/tray` owns the main goroutine (Windows requires the tray message pump there).
+There is no permanent GUI window: double-clicking the executable runs it silently into
+the system tray with no popups or notifications.
 
-`drs-agent install` writes an HKCU `…\CurrentVersion\Run` entry with `-startup` (hidden to
-tray at login). **HKCU login entry, not a Windows service** — a service runs in session 0,
+The tray icon displays the current state:
+- ⚪ Grey: Reconnecting / offline / unenrolled.
+- 🟢 Green: Connected and available.
+- 🔴 Red: Screen is being viewed by an operator.
+
+Right-clicking the tray icon provides:
+- Live connection status display
+- Connected server URL display
+- `Reconnect`: immediately interrupts backoff and dials the server
+- `Change Server / Token…`: prompts to enter an invite link or server URL and token
+- `Quit DRS Agent`: cleanly shuts down the connection and exits
+
+`drs-agent install` writes an HKCU `…\CurrentVersion\Run` entry. **HKCU login entry, not a Windows service** — a service runs in session 0,
 which has no visible desktop, so capture there returns nothing. A `Local\`-scoped named mutex
 prevents a second instance: two copies would authenticate as the same device and evict each
 other in an endless reconnect loop.
@@ -202,4 +202,4 @@ drs-agent.exe install    # start at login
   and both already run in parallel with capture.
 - No JPEG-over-WebSocket fallback **by design**: relaying video through the server is what
   this architecture exists to avoid. A failed session is reported, not downgraded.
-- `internal/tray/` is dead code superseded by the Fyne GUI; nothing imports it.
+- The executable is trimmed down to ~15 MB by eliminating Fyne and all OpenGL/graphics dependencies.

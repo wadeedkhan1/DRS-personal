@@ -41,7 +41,7 @@ type StatusFunc func(online bool, inSession bool)
 // It returns nil on clean shutdown and an error only when the server said to stop for
 // good, which is the difference that matters: a revoked secret must not turn into an
 // infinite reconnect loop hammering the server.
-func Run(ctx context.Context, cfg config.Config, onStatus StatusFunc) error {
+func Run(ctx context.Context, cfg config.Config, onStatus StatusFunc, reconnect <-chan struct{}) error {
 	backoff := minBackoff
 
 	for {
@@ -49,7 +49,19 @@ func Run(ctx context.Context, cfg config.Config, onStatus StatusFunc) error {
 			return nil
 		}
 
-		fatal, transient := session(ctx, cfg, onStatus)
+		sessCtx, cancelSess := context.WithCancel(ctx)
+		go func() {
+			select {
+			case <-sessCtx.Done():
+			case <-reconnect:
+				log.Println("agent: manual reconnect triggered, aborting current session")
+				cancelSess()
+			}
+		}()
+
+		fatal, transient := session(sessCtx, cfg, onStatus)
+		cancelSess()
+
 		if fatal != nil {
 			log.Printf("agent: fatal: %v — stopping", fatal)
 			return fatal
@@ -61,11 +73,14 @@ func Run(ctx context.Context, cfg config.Config, onStatus StatusFunc) error {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-reconnect:
+			log.Println("agent: manual reconnect triggered during backoff")
+			backoff = minBackoff
 		case <-time.After(backoff):
-		}
-		backoff *= 2
-		if backoff > maxBackoff {
-			backoff = maxBackoff
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
 		}
 	}
 }
