@@ -5,12 +5,31 @@ import { useAuth } from '../context/AuthContext';
 import { useDevices } from '../context/DeviceContext';
 import { X, Copy, Check, Monitor, Smartphone, Download, AlertCircle, Users } from 'lucide-react';
 import { useAgentDownload } from '../hooks/useAgentDownload';
+import { copyText } from '../utils/clipboard';
 
 interface EnrollModalProps {
   isOpen: boolean;
   onClose: () => void;
   onEnrolled: () => void;
 }
+
+// Declared at module scope on purpose. Defined inside the modal it was a fresh component type
+// on every render, so React tore the button down and rebuilt it after each keystroke and each
+// copy — losing focus and the tick along with it.
+const CopyButton: React.FC<{ copied: boolean; onCopy: () => void; title: string }> = ({
+  copied,
+  onCopy,
+  title,
+}) => (
+  <button
+    type="button"
+    onClick={onCopy}
+    className="p-1.5 text-slate-400 hover:text-white rounded bg-slate-800 shrink-0 ml-auto"
+    title={title}
+  >
+    {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+  </button>
+);
 
 export const EnrollDeviceModal: React.FC<EnrollModalProps> = ({ isOpen, onClose, onEnrolled }) => {
   const { isSuperAdmin, user } = useAuth();
@@ -28,6 +47,9 @@ export const EnrollDeviceModal: React.FC<EnrollModalProps> = ({ isOpen, onClose,
   // Keyed by what was copied, not a single boolean: one flag made copying any button
   // tick every button, which reads as "I copied the wrong thing".
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  // A copy can genuinely fail (no clipboard permission, and no execCommand either). Saying
+  // so beats a tick that lies — the admin is about to paste this into a chat window.
+  const [copyFailed, setCopyFailed] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -42,6 +64,7 @@ export const EnrollDeviceModal: React.FC<EnrollModalProps> = ({ isOpen, onClose,
     if (!isOpen) return;
     setToken(null);
     setCopiedKey(null);
+    setCopyFailed(false);
     setError(null);
     // /api/users is Super Admin only — asking as an Admin would 403 and leave a
     // mysteriously empty dropdown, so only the picker's actual audience fetches it.
@@ -79,21 +102,13 @@ export const EnrollDeviceModal: React.FC<EnrollModalProps> = ({ isOpen, onClose,
   const inviteLink = token ? `${window.location.origin}/enroll?token=${token}` : '';
   const selectedGroup = groups.find((g) => g.id === groupId);
 
-  const copyToClipboard = (key: string, text: string) => {
-    navigator.clipboard.writeText(text);
+  const copyToClipboard = async (key: string, text: string) => {
+    const ok = await copyText(text);
+    setCopyFailed(!ok);
+    if (!ok) return;
     setCopiedKey(key);
     setTimeout(() => setCopiedKey((k) => (k === key ? null : k)), 2000);
   };
-
-  const CopyButton: React.FC<{ k: string; text: string; title: string }> = ({ k, text, title }) => (
-    <button
-      onClick={() => copyToClipboard(k, text)}
-      className="p-1.5 text-slate-400 hover:text-white rounded bg-slate-800 shrink-0 ml-auto"
-      title={title}
-    >
-      {copiedKey === k ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-    </button>
-  );
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-200">
@@ -245,7 +260,11 @@ export const EnrollDeviceModal: React.FC<EnrollModalProps> = ({ isOpen, onClose,
               </div>
               <div className="flex items-center gap-2 p-3 rounded-xl bg-slate-950 border border-slate-800 font-mono text-xs text-sky-300">
                 <span className="truncate">{inviteLink}</span>
-                <CopyButton k="link" text={inviteLink} title="Copy invite link" />
+                <CopyButton
+                  copied={copiedKey === 'link'}
+                  onCopy={() => copyToClipboard('link', inviteLink)}
+                  title="Copy invite link"
+                />
               </div>
               <p className="text-[11px] text-slate-400 mt-2 leading-relaxed">
                 Works for <span className="text-slate-300">any number of devices</span>, on
@@ -259,6 +278,16 @@ export const EnrollDeviceModal: React.FC<EnrollModalProps> = ({ isOpen, onClose,
                 .
               </p>
             </div>
+
+            {copyFailed && (
+              <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 flex items-start gap-2.5">
+                <AlertCircle className="w-3.5 h-3.5 text-rose-400 mt-0.5 shrink-0" />
+                <p className="text-[11px] text-rose-300 leading-relaxed">
+                  The browser blocked the copy. Select the text and copy it by hand — or open
+                  this panel over HTTPS, which is what the clipboard API requires.
+                </p>
+              </div>
+            )}
 
             <div className="p-3 rounded-xl bg-slate-800/40 border border-slate-700/60">
               <p className="text-[11px] text-slate-400 leading-relaxed">
@@ -301,7 +330,11 @@ export const EnrollDeviceModal: React.FC<EnrollModalProps> = ({ isOpen, onClose,
               <div className="space-y-2 mt-2">
                 <div className="flex items-center gap-2 p-2.5 rounded-xl bg-slate-950 border border-slate-800 font-mono text-xs text-emerald-300">
                   <span className="truncate">{token}</span>
-                  <CopyButton k="token" text={token} title="Copy code" />
+                  <CopyButton
+                    copied={copiedKey === 'token'}
+                    onCopy={() => copyToClipboard('token', token)}
+                    title="Copy code"
+                  />
                 </div>
                 <p className="leading-relaxed">
                   Only needed for an agent that was not downloaded through this link — an
@@ -312,8 +345,13 @@ export const EnrollDeviceModal: React.FC<EnrollModalProps> = ({ isOpen, onClose,
                     drs-agent.exe enroll -server {window.location.origin} -token {token}
                   </span>
                   <CopyButton
-                    k="cli"
-                    text={`drs-agent.exe enroll -server ${window.location.origin} -token ${token}`}
+                    copied={copiedKey === 'cli'}
+                    onCopy={() =>
+                      copyToClipboard(
+                        'cli',
+                        `drs-agent.exe enroll -server ${window.location.origin} -token ${token}`,
+                      )
+                    }
                     title="Copy command"
                   />
                 </div>

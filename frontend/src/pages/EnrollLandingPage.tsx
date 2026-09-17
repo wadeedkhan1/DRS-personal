@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { Shield, Copy, Check, Monitor, Smartphone, AlertCircle, Download, Zap } from 'lucide-react';
 import { useAgentDownload, androidSetupLink } from '../hooks/useAgentDownload';
+import { copyText } from '../utils/clipboard';
 
 /**
  * Where an invite link lands when somebody clicks it.
@@ -26,6 +27,7 @@ export const EnrollLandingPage: React.FC = () => {
   const [params] = useSearchParams();
   const token = params.get('token');
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
 
   const windowsAgent = useAgentDownload('windows', token ?? undefined);
   const androidAgent = useAgentDownload('android', token ?? undefined);
@@ -35,8 +37,12 @@ export const EnrollLandingPage: React.FC = () => {
   const looksAndroid = /android/i.test(navigator.userAgent);
   const setupLink = token ? androidSetupLink(window.location.origin, token) : '';
 
-  const copy = (text: string) => {
-    navigator.clipboard.writeText(text);
+  const copy = async (text: string) => {
+    // Goes through the helper because this page is usually opened over plain HTTP on a LAN
+    // address, where navigator.clipboard does not exist at all. See utils/clipboard.
+    const ok = await copyText(text);
+    setCopyFailed(!ok);
+    if (!ok) return;
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -241,6 +247,12 @@ export const EnrollLandingPage: React.FC = () => {
                         )}
                       </button>
                     </div>
+                    {copyFailed && (
+                      <p className="leading-relaxed text-rose-300">
+                        The browser blocked the copy — select the code above and copy it by
+                        hand.
+                      </p>
+                    )}
                   </div>
                 </details>
               </div>

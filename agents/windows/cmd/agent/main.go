@@ -183,7 +183,23 @@ func runAgent() {
 		},
 		OnChangeConfig: func() {
 			cfg, _ := config.Load()
-			server, token, ok := tray.PromptCredentials(cfg.ServerURL, "")
+			// A downloaded agent already carries its server address and invite token in
+			// the trailer, so offer both as the dialog's defaults. This used to pass an
+			// empty token, which left the field blank on a binary that knew the answer
+			// perfectly well — the only way to fill it in was to go and find the invite
+			// link again on another machine.
+			//
+			// The trailer wins over the saved identity when it has one. It records where
+			// whoever handed out this executable wants the device to point *now*, while
+			// the saved serverUrl records wherever it last happened to enroll — which,
+			// on a machine that has been re-pointed, is precisely the stale value the
+			// operator opened this dialog to correct.
+			server, token := cfg.ServerURL, ""
+			if emb, embErr := config.ReadEmbedded(); embErr == nil {
+				server = emb.ServerURL
+				token = emb.Token
+			}
+			server, token, ok := tray.PromptCredentials(server, token)
 			if !ok {
 				return
 			}
@@ -243,8 +259,16 @@ func runAgent() {
 		}
 
 		// 3. Neither enrolled nor self-enrolled: sit in tray and await configuration.
+		// Name the address self-enrollment was aiming at, when the binary carries one.
+		// Blanking it here meant a failed self-enrollment looked identical to a plain
+		// developer build, which is the one case where knowing the baked-in server is
+		// what tells you the download was configured wrong.
 		c.Set(tray.Unenrolled)
-		c.SetServer("")
+		if embErr == nil {
+			c.SetServer(embedded.ServerURL)
+		} else {
+			c.SetServer("")
+		}
 	}
 
 	// Systray must own the main goroutine on Windows.

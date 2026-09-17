@@ -51,3 +51,5 @@ Thumbs.db
 .idea/
 .vscode/
 *.iml
+agents/windows/Check-Baked.ps1
+agents/windows/check-baked.sh

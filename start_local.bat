@@ -28,7 +28,10 @@ start "DRS Backend" cmd /k "cd /d %~dp0backend && go run ./cmd/server"
 timeout /t 3 >nul
 
 if not exist "%~dp0frontend\node_modules" (
-    echo Installing frontend dependencies (npm install)...
+    REM No parentheses in this message: cmd parses the whole if-block before running it,
+    REM so an unescaped ')' here closes the block early and the rest of the line is left
+    REM dangling as a command -- "... was unexpected at this time."
+    echo Installing frontend dependencies via npm install ...
     pushd "%~dp0frontend"
     call npm install
     popd
